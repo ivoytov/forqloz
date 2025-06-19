@@ -416,11 +416,11 @@ const gridApi = agGrid.createGrid(gridDiv, gridOptions)
 
 
 const csvPromises = [
-    loadCSV('web/foreclosures/auction_sales.csv', 'SALE DATE'),
-    loadCSV('web/foreclosures/cases.csv', dateKey = 'auction_date'),
-    loadCSV('web/foreclosures/lots.csv', dateKey = null),
-    loadCSV('web/foreclosures/bids.csv', dateKey = 'auction_date'),
-    loadCSV('web/foreclosures/pluto.csv', dateKey = null),
+    loadCSV('foreclosures/auction_sales.csv', 'SALE DATE'),
+    loadCSV('foreclosures/cases.csv', dateKey = 'auction_date'),
+    loadCSV('foreclosures/lots.csv', dateKey = null),
+    loadCSV('foreclosures/bids.csv', dateKey = 'auction_date'),
+    loadCSV('foreclosures/pluto.csv', dateKey = null),
 ]
 
 // Use Promise.all to wait for all promises to resolve
