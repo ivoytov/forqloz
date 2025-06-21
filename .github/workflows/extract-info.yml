@@ -46,7 +46,3 @@ jobs:
         git push --force-with-lease
 
 
-  push-static-pages:
-    needs: extract-info
-    uses: ./.github/workflows/static.yml
-        
