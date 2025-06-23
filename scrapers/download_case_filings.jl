@@ -42,11 +42,11 @@ get_filename(case_number) = replace(case_number, "/" => "-") * ".pdf"
 function download_pdf_links()
 	download_path = "web/foreclosures/download.csv"
     rows = CSV.read(download_path, DataFrame)
-	filter!(:filename => filename -> !isfile(joinpath("saledocs", filename)), rows)
+	filter!(:filename => filename -> !isfile(joinpath("web/saledocs", filename)), rows)
 	CSV.write(download_path, rows)
 
 	for row in eachrow(rows)
-		path = joinpath("saledocs", row.filename)
+		path = joinpath("web/saledocs", row.filename)
 		run(pipeline(ignorestatus(`node scrapers/download_pdf.js $(row.url) $path`), stdout, stderr), wait=true)				
 	end
 end
@@ -61,7 +61,7 @@ function missing_filings(case_number, auction_date)
 
     res = []
     for (key, dir) in FilingType
-        pdfPath = joinpath("saledocs", dir, filename)
+        pdfPath = joinpath("web/saledocs", dir, filename)
         if !isfile(pdfPath)
             push!(res, dir)
         end

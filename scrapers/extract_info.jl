@@ -150,7 +150,7 @@ function prompt_for_winning_bid(foreclosure_case)
 
     # Extract text from PDF manually
     filename = replace(case_number, "/" => "-") * ".pdf"
-    pdf_path = joinpath("saledocs/surplusmoney", filename)
+    pdf_path = joinpath("web/saledocs/surplusmoney", filename)
     run(`open "$pdf_path"`)
         
     prices = extract_llm_values(pdf_path)
@@ -183,7 +183,7 @@ function get_auction_results()
     bids = CSV.read(bids_path, DataFrame)
 
     # Read in which files exist
-    files = readdir("saledocs/surplusmoney") .|> x -> replace(x[1:end-4], "-" => "/")
+    files = readdir("web/saledocs/surplusmoney") .|> x -> replace(x[1:end-4], "-" => "/")
 
     filter!(row -> row.auction_date < today(), cases)
     filter!(row -> row.case_number in files, cases)
@@ -198,7 +198,7 @@ function get_auction_results()
     println("CSV file bids.csv has been updated with missing bid results values.")
 end
 
-notice_of_sale_path(case_number) = joinpath("saledocs/noticeofsale", replace(case_number, "/" => "-") * ".pdf")
+notice_of_sale_path(case_number) = joinpath("web/saledocs/noticeofsale", replace(case_number, "/" => "-") * ".pdf")
 
 # Extract block/lot/address from file
 function parse_notice_of_sale(pdf_path)
@@ -256,7 +256,7 @@ function get_block_and_lot()
     lots = CSV.read(lots_path, DataFrame)
 
     # Read in which files exist
-    files = readdir("saledocs/noticeofsale") .|> x -> replace(x[1:end-4], "-" => "/")
+    files = readdir("web/saledocs/noticeofsale") .|> x -> replace(x[1:end-4], "-" => "/")
 
     filter!(row -> row.case_number in files, cases)
 

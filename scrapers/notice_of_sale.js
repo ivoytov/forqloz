@@ -32,7 +32,7 @@ function missing_filings(index_number) {
         const { dir } = FilingType[f]
 
         const filename = index_number.replace('/', '-') + ".pdf"
-        const pdfPath = path.resolve(`saledocs/${dir}/${filename}`);
+        const pdfPath = path.resolve(`web/saledocs/${dir}/${filename}`);
         if (!existsSync(pdfPath)) {
             out.push(FilingType[f])
         }
@@ -119,7 +119,7 @@ export async function download_filing(index_number, county, auction_date, missin
     const filename = index_number.replace('/', '-') + ".pdf"
     for (const filing of missingFilings) {
         const { dir, id } = filing
-        const pdfPath = path.resolve(`saledocs/${dir}/${filename}`);
+        const pdfPath = path.resolve(`web/saledocs/${dir}/${filename}`);
         if (!existsSync(pdfPath) && availableFilings.includes(id)) {
             await page.select('select#selDocumentType', id);
 
