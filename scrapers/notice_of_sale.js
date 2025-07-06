@@ -76,6 +76,33 @@ export async function download_filing(index_number, county, auction_date, missin
         }),
     ]);
 
+    // Check for CAPTCHA before proceeding
+    let maxWaitTime = 60; // seconds
+    while (maxWaitTime > 0) {
+        const isCaptcha = await page.evaluate(() => {
+            const bodyText = document.body.innerText.toLowerCase();
+            return bodyText.includes("having captcha trouble?");
+        });
+
+        if (!isCaptcha) break;
+
+        console.log("Captcha detected. Waiting for manual solve...");
+        await sleep(5); // your existing sleep function
+        maxWaitTime -= 5;
+    }
+
+    if (maxWaitTime <= 0) {
+        console.warn(`${index_number} captcha not solved in time`);
+        return { error: "captcha timeout" };
+    }
+
+
+    const tableExists = await page.$("table.NewSearchResults");
+    if (!tableExists) {
+        console.warn(`\n\n${index_number} couldn't find a valid case with this index (table missing)`);
+        return { error: 'No case found' };
+    }
+
 
     try {
         await Promise.all([
