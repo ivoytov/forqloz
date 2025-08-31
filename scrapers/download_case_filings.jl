@@ -120,7 +120,7 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
 
 	total = nrow(rows)
 	for (idx, row) in enumerate(eachrow(rows))
-		show_progress_bar && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("# active tasks", running_tasks), ("# failed", failed_jobs), ("# finished", finished_tasks)])
+		show_progress_bar && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date),  ("# finished", "$idx / $finished_tasks / $(total-idx) / $total")])
         !show_progress_bar && println("$idx/$total === $(row.case_number) $(row.borough) ===")
 
 		task = Task() do 
