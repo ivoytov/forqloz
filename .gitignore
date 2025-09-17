@@ -34,3 +34,5 @@ saledocs/judgement
 eng.traineddata
 calendar_test.js
 scrapers/test.js
+*.sqlite-wal
+*.sqlite-shm
