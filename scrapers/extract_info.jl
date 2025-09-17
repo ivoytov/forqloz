@@ -1,6 +1,9 @@
-using CSV, DataFrames, ProgressMeter, OCReract, Dates, Printf, OpenAI, Base64, JSON3, DotEnv
+using CSV, DataFrames, ProgressMeter, OCReract, Dates, Printf, OpenAI, Base64, JSON3, DotEnv, SQLite, DBInterface
 
 DotEnv.load!()
+
+const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "foreclosures.sqlite"))
+db() = SQLite.DB(DB_PATH)
 
 # Function to prompt with a default answer
 function prompt(question, default_answer)
@@ -174,16 +177,29 @@ function prompt_for_winning_bid(foreclosure_case)
         winning_bid=prices.winning_bid
     )
 
-    # append the row to the bids CSV file
-    CSV.write("web/foreclosures/bids.csv", DataFrame([row]); append=true, header=false)
+    # insert the row into the bids table
+    dbh = db()
+    try
+        sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
+        DBInterface.execute(dbh, sql, (row.case_number, row.borough, string(row.auction_date), row.judgement, row.upset_price, row.winning_bid))
+    finally
+        SQLite.close(dbh)
+    end
 end
 
 # Get auction results
 function get_auction_results()
-    # Read the cases file
-    cases = CSV.read("web/foreclosures/cases.csv", DataFrame)
-    bids_path = "web/foreclosures/bids.csv"
-    bids = CSV.read(bids_path, DataFrame)
+    # Read cases and bids from SQLite
+    dbh = db()
+    cases, bids = DataFrame(), DataFrame()
+    try
+        cases = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough, auction_date FROM cases"))
+        # Parse auction_date strings to Date for filtering/sorting
+        cases.auction_date = [ismissing(x) ? missing : Date(x, dateformat"yyyy-mm-dd") for x in cases.auction_date]
+        bids = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough FROM bids"))
+    finally
+        SQLite.close(dbh)
+    end
 
     # Read in which files exist
     files = readdir("web/saledocs/surplusmoney") .|> x -> replace(x[1:end-4], "-" => "/")
@@ -198,7 +214,7 @@ function get_auction_results()
     prompt_for_winning_bid.(eachrow(cases))
 
 
-    println("CSV file bids.csv has been updated with missing bid results values.")
+    println("Database table 'bids' has been updated with missing bid results values.")
 end
 
 notice_of_sale_path(case_number) = joinpath("web/saledocs/noticeofsale", replace(case_number, "/" => "-") * ".pdf")
@@ -253,10 +269,16 @@ end
 
 # Get block and lot
 function get_block_and_lot()
-    # Read the cases file
-    cases = CSV.read("web/foreclosures/cases.csv", DataFrame)
-    lots_path = "web/foreclosures/lots.csv"
-    lots = CSV.read(lots_path, DataFrame)
+    # Read the cases and lots tables
+    dbh = db()
+    cases, lots = nothing, nothing
+    try
+        cases = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough, auction_date FROM cases"))
+        cases.auction_date = [ismissing(x) ? missing : Date(x, dateformat"yyyy-mm-dd") for x in cases.auction_date]
+        lots = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough FROM lots"))
+    finally
+        SQLite.close(dbh)
+    end
 
     # Read in which files exist
     files = readdir("web/saledocs/noticeofsale") .|> x -> replace(x[1:end-4], "-" => "/")
@@ -285,12 +307,19 @@ function get_block_and_lot()
         )
         printstyled(@sprintf("%12s block %6d lot %5d address %s\n", row.case_number, row.block, row.lot, row.address), color=:light_green)
 
-        # append the row to the bids CSV file
-        CSV.write("web/foreclosures/lots.csv", DataFrame([row]); append=true, header=false)
+        # insert the row into the lots table
+        dbh2 = db()
+        try
+            sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            addr = ismissing(row.address) ? nothing : row.address
+            DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
+        finally
+            SQLite.close(dbh2)
+        end
     end
 
     # Convert updated rows back to CSV
-    println("CSV file has been updated with missing block and lot values.")
+    println("Database table 'lots' has been updated with missing block and lot values.")
 end
 
 

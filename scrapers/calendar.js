@@ -1,8 +1,7 @@
-import csv from 'csv-parser';
-import { createReadStream, writeFileSync } from 'fs';
 import { connect } from 'puppeteer-core';
-import { stringQuoteOnlyIfNecessary as stringQuoteOnlyIfNecessaryFormatter } from '@json2csv/formatters';
-import { Parser } from '@json2csv/plainjs';
+import Database from 'better-sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 function sleep(s) {
     return new Promise(resolve => setTimeout(resolve, s * 1000));
@@ -54,47 +53,36 @@ for (const borough in boroughConfigDict) {
     }
 }
 
-// case_number,borough,auction_date,has_nos,has_smf,has_judgement,has_nyscef
-const csvFilePath = 'web/foreclosures/cases.csv';
-const rows = [];
-// Read the CSV file
-createReadStream(csvFilePath)
-    .pipe(csv())
-    .on('data', (row) => {
-        rows.push(row);
-    })
-    .on('end', async () => {
-        // for cases that were already in the file, update the auction date
-        const existingLots = auctionLots.filter(lot => rows.some(({ case_number, auction_date }) => case_number === lot.case_number && auction_date != lot.auction_date))
-        for (const lot of existingLots) {
-            const row = rows.find(({case_number}) => case_number === lot.case_number)
-            row.auction_date = lot.auction_date
-        }
+// Update SQLite cases table instead of CSV
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DB_PATH = path.resolve(__dirname, '..', 'web', 'foreclosures', 'foreclosures.sqlite');
 
-        // append brand new cases that we haven't seen before
-        const newLots = auctionLots.filter(lot => !rows.some(({ case_number }) => case_number === lot.case_number))
-        rows.push(...newLots)
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
 
-        console.log(`Updated ${existingLots.length} lots and Found ${newLots.length} net new foreclosure cases before ${maxDate} across all boroughs.`)
+// Ensure unique constraint for UPSERT
+db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_cases_case_boro ON cases(case_number, borough)').run();
 
+const upsertStmt = db.prepare(`
+    INSERT INTO cases (case_number, borough, auction_date, case_name)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(case_number, borough) DO UPDATE SET
+      auction_date = excluded.auction_date,
+      case_name = excluded.case_name
+`);
 
-        // Convert updated rows back to CSV
-        //case_number,borough,auction_date,case_name
-        const opts = {
-            fields: ['case_number', 'borough', 'auction_date', 'case_name'],
-            formatters: {
-                string: stringQuoteOnlyIfNecessaryFormatter()
-            }
-        }
-        const parser = new Parser(opts);
-        const updatedCsv = parser.parse(rows) + '\n';
+let upserts = 0;
+db.transaction(() => {
+    for (const lot of auctionLots) {
+        upsertStmt.run(lot.case_number, lot.borough, lot.auction_date, lot.case_name);
+        upserts++;
+    }
+})();
 
-        // Write updated CSV to file
-        writeFileSync(csvFilePath, updatedCsv, 'utf8');
-
-        console.log('CSV file has been updated with new foreclosure cases.');
-        process.exit()
-    });
+console.log(`Upserted ${upserts} foreclosure cases before ${maxDate} across all boroughs.`);
+console.log('Database has been updated with new foreclosure cases via UPSERT.');
+process.exit();
 
 
 async function getAuctionLots(borough, { courtId, calendarId }, maxDate) {

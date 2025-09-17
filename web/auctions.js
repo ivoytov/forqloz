@@ -2,38 +2,69 @@ const minTransactionPrice = 10000
 let markers = {};
 
 
-// Function to load CSV file using PapaParse
-function loadCSV(url, dateKey = "auction_date") {
-    return new Promise((resolve, reject) => {
-        Papa.parse(url, {
-            download: true,
-            header: true,
-            skipEmptyLines: true,
-            dynamicTyping: true,
-            complete: results => {
-                if (dateKey) {
-                    // Convert "SALE DATE" property to JavaScript Date objects
-                    results.data = results.data.map(obj => {
-                        // Use destructuring to get other properties if needed
-                        const { [dateKey]: saleDate, ...rest } = obj;
-
-                        // Convert string to Date, set to midnight (otherwise date filter doesn't work)
-                        const saleDateObj = new Date(saleDate);
-                        saleDateObj.setHours(24, 0, 0, 0)
-
-                        // Add other properties back if needed
-                        return { [dateKey]: saleDateObj, ...rest };
-                    });
-                }
-                resolve(results.data);
-            },
-            error: error => {
-                reject(error.message);
-            }
-        });
-    });
-}
+// Use SQLite DB (sql.js) only — no CSV fallback
+const DB_PATH = 'foreclosures/foreclosures.sqlite'
 let combinedData = []
+
+async function loadDB() {
+    try {
+        if (typeof initSqlJs !== 'function') return null;
+        // Load wasm assets from CDN
+        const SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${f}` });
+        const resp = await fetch(DB_PATH);
+        if (!resp.ok) return null;
+        const buf = await resp.arrayBuffer();
+        const db = new SQL.Database(new Uint8Array(buf));
+
+        const run = (sql) => {
+            const res = db.exec(sql);
+            if (!res || res.length === 0) return [];
+            const { columns, values } = res[0];
+            return values.map(row => Object.fromEntries(row.map((v, i) => [columns[i], v])));
+        };
+
+        const sales = run('SELECT * FROM auction_sales');
+        const auctions = run('SELECT * FROM cases');
+        const lots = run('SELECT * FROM lots');
+        const bids = run('SELECT * FROM bids');
+        const pluto = run('SELECT * FROM pluto');
+
+        // Convert date-like strings to Date objects to match CSV path behavior
+        for (const s of sales) {
+            if (s['SALE DATE']) {
+                const d = new Date(s['SALE DATE']); d.setHours(24,0,0,0); s['SALE DATE'] = d;
+            }
+            // Ensure numeric fields parsed as numbers where possible
+            if (typeof s['SALE PRICE'] === 'string') s['SALE PRICE'] = Number(s['SALE PRICE']);
+        }
+        for (const a of auctions) {
+            if (a['auction_date']) { const d = new Date(a['auction_date']); d.setHours(24,0,0,0); a['auction_date'] = d; }
+        }
+        for (const b of bids) {
+            if (b['auction_date']) { const d = new Date(b['auction_date']); d.setHours(24,0,0,0); b['auction_date'] = d; }
+            // Coerce numerics
+            ['judgement','upset_price','winning_bid'].forEach(k => { if (typeof b[k] === 'string') b[k] = Number(b[k]); });
+        }
+        for (const p of pluto) {
+            ['LandUse','Block','Lot','BBL','ZipCode','LotArea','BldgArea','YearBuilt','YearAlter1','YearAlter2'].forEach(k => {
+                if (k in p && typeof p[k] === 'string' && p[k] !== '') p[k] = Number(p[k]);
+            });
+        }
+        for (const l of lots) {
+            ['block','lot','BBL'].forEach(k => { if (k in l && typeof l[k] === 'string' && l[k] !== '') l[k] = Number(l[k]); });
+        }
+
+        return { sales, auctions, lots, bids, pluto };
+    } catch (e) {
+        console.error('Failed to load SQLite DB:', e);
+        throw e;
+    }
+}
+
+async function loadData() {
+    const { sales, auctions, lots, bids, pluto } = await loadDB();
+    return [sales, auctions, lots, bids, pluto];
+}
 
 
 function updateURLWithFilters(filters) {
@@ -415,16 +446,8 @@ const gridDiv = document.querySelector('#myGrid');
 const gridApi = agGrid.createGrid(gridDiv, gridOptions)
 
 
-const csvPromises = [
-    loadCSV('foreclosures/auction_sales.csv', 'SALE DATE'),
-    loadCSV('foreclosures/cases.csv', dateKey = 'auction_date'),
-    loadCSV('foreclosures/lots.csv', dateKey = null),
-    loadCSV('foreclosures/bids.csv', dateKey = 'auction_date'),
-    loadCSV('foreclosures/pluto.csv', dateKey = null),
-]
-
-// Use Promise.all to wait for all promises to resolve
-Promise.all(csvPromises).then(([sales, auctions, lots, bids, pluto]) => {
+// Load from DB only
+loadData().then(([sales, auctions, lots, bids, pluto]) => {
     combinedData = sales
     // get the address from transaction records
     for (const lot of lots) {
@@ -485,7 +508,7 @@ Promise.all(csvPromises).then(([sales, auctions, lots, bids, pluto]) => {
     applyFiltersFromURL(new URLSearchParams(window.location.search));
 })
     .catch(error => {
-        console.error('Error loading CSV files:', error);
+        console.error('Error loading SQLite database:', error);
     });
 
 
