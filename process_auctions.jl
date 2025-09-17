@@ -1,4 +1,6 @@
-using DataFrames, Dates, CSV, GLM, Statistics, JSON3, HTTP, Printf
+using DataFrames, Dates, CSV, GLM, Statistics, JSON3, HTTP, Printf, SQLite, DBInterface
+
+const DB_PATH = normpath(joinpath(@__DIR__, "web", "foreclosures", "foreclosures.sqlite"))
 
 
 # Function to read CSV file into DataFrame
@@ -6,7 +8,6 @@ read_csv(file) = CSV.read(file, DataFrame)
 
 borough_dict = Dict(1 => "Manhattan", 2 => "Bronx", 3 => "Brooklyn", 4 => "Queens", 5 => "Staten Island")
 borough_id_dict = Dict("Manhattan" => "1", "Bronx"=>"2", "Brooklyn"=>"3", "Queens" =>"4", "Staten Island"=>"5")
-
 
 # Initialize and preprocess datasets
 function initialize_data()
@@ -23,18 +24,25 @@ end
 # Main function to calculate and export home price indices
 function main()
     sales = initialize_data()
-    lot_path = "web/foreclosures/lots.csv"
-    auctions = read_csv(lot_path)
+    # Load lots from DB
+    dbh = SQLite.DB(DB_PATH)
+    auctions = DataFrame(DBInterface.execute(dbh, "SELECT * FROM lots"))
 
-    updated_auctions = filter(row -> ismissing(row.BBL) || ((row.lot > 1000) && ismissing(row.unit)), auctions)
-    transform!(updated_auctions, [:borough, :block, :lot] => ByRow(bbl) => [:BBL, :unit])
-    filter!(row -> !(ismissing(row.BBL) || ((row.lot > 1000) && ismissing(row.unit))), auctions)
-    auctions = vcat(auctions, updated_auctions)
-    CSV.write(lot_path, auctions)
+    # Fill in missing BBL / unit information
+    need_update = filter(row -> ismissing(row.BBL) || ((row.lot > 1000) && ismissing(row.unit)), auctions)
+    if nrow(need_update) > 0
+        for r in eachrow(need_update)
+            new_bbl, new_unit = bbl(r.borough, r.block, r.lot)
+            DBInterface.execute(dbh,
+                "UPDATE lots SET BBL = ?, unit = ? WHERE case_number = ? AND borough = ?",
+                (new_bbl, new_unit, r.case_number, r.borough))
+        end
+        # Reload auctions after updates
+        auctions = DataFrame(DBInterface.execute(dbh, "SELECT * FROM lots"))
+    end
 
     # update pluto file
-    pluto_path = "web/foreclosures/pluto.csv"
-    pluto_data = read_csv(pluto_path)
+    pluto_data = DataFrame(DBInterface.execute(dbh, "SELECT * FROM pluto"))
     new_lots = antijoin(dropmissing(auctions, :BBL), pluto_data, on=:BBL)
 
     # Iterate over each BBL in `auctions` and call the `pluto` function, storing the results in the DataFrame
@@ -52,10 +60,11 @@ function main()
                 push!(row, (attributes[col]))
             end
             
-            push!(pluto_data, row; promote=true)
+            # Insert into pluto table
+            sql = "INSERT INTO pluto (Address, Borough, Block, Lot, ZipCode, BldgClass, LandUse, BBL, YearBuilt, YearAlter1, YearAlter2, OwnerName, LotArea, BldgArea) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            DBInterface.execute(dbh, sql, Tuple(row))
         end
     end
-    CSV.write(pluto_path, pluto_data; transform=(col, val) -> something(val, missing))
 
 
     # Merge auctions and sales DataFrames
@@ -68,7 +77,42 @@ function main()
     exclude_prefixes = ["45", "25", "26", "28"]
     filter!(row -> !ismissing(row."BUILDING CLASS CATEGORY") &&
         all(prefix -> !startswith(row."BUILDING CLASS CATEGORY", prefix), exclude_prefixes), merged_df)    
-    CSV.write("web/foreclosures/auction_sales.csv", merged_df)
+    # Ensure "SALE DATE" is stored as ISO text not BLOB
+    transform!(merged_df, "SALE DATE" => ByRow(d -> Dates.format(d, dateformat"yyyy-mm-dd")) => "SALE DATE")
+
+    # Replace auction_sales table with explicit schema to avoid BLOB types
+    DBInterface.execute(dbh, "DROP TABLE IF EXISTS auction_sales")
+    DBInterface.execute(dbh, join([
+        "CREATE TABLE auction_sales (",
+        "\"BOROUGH\" TEXT,",
+        "\"NEIGHBORHOOD\" TEXT,",
+        "\"BUILDING CLASS CATEGORY\" TEXT,",
+        "\"TAX CLASS AT PRESENT\" TEXT,",
+        "\"BLOCK\" INTEGER,",
+        "\"LOT\" INTEGER,",
+        "\"EASEMENT\" INTEGER,",
+        "\"BUILDING CLASS AT PRESENT\" TEXT,",
+        "\"ADDRESS\" TEXT,",
+        "\"APARTMENT NUMBER\" TEXT,",
+        "\"ZIP CODE\" INTEGER,",
+        "\"RESIDENTIAL UNITS\" INTEGER,",
+        "\"COMMERCIAL UNITS\" INTEGER,",
+        "\"TOTAL UNITS\" INTEGER,",
+        "\"LAND SQUARE FEET\" INTEGER,",
+        "\"GROSS SQUARE FEET\" INTEGER,",
+        "\"YEAR BUILT\" INTEGER,",
+        "\"TAX CLASS AT TIME OF SALE\" INTEGER,",
+        "\"BUILDING CLASS AT TIME OF SALE\" TEXT,",
+        "\"SALE PRICE\" REAL,",
+        "\"SALE DATE\" TEXT",
+        ")"
+    ]))
+    # Insert the data
+    SQLite.load!(merged_df, dbh, "auction_sales")
+    # Recreate helpful indexes
+    DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_sales_geo ON auction_sales(\"BOROUGH\", \"BLOCK\", \"LOT\")")
+    DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_sales_date ON auction_sales(\"SALE DATE\")")
+    SQLite.close(dbh)
 end
 
 function condo_base_bbl_key(borough, block, lot)
@@ -123,6 +167,3 @@ function bbl(borough, block, lot)
 end
 
 main()
-
-
-
