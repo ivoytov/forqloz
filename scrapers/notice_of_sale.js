@@ -228,7 +228,8 @@ export async function download_filing(index_number, county, auction_date, missin
 
 if (import.meta.url === `file://${process.argv[1]}`) {
     const endpoint = process.env.WSS ?? SBR_WS_ENDPOINT;
-    const auction_date = new Date(process.argv[4])
+    let auction_date = new Date(process.argv[4]);
+    if (isNaN(auction_date)) auction_date = null;
 
     const args = process.argv.slice(2, process.argv.length).join(" ")
     const county = process.argv[3] == 'Staten' ? `${process.argv[3]} ${process.argv[4]}` : process.argv[3]
