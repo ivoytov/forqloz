@@ -217,7 +217,19 @@ function get_auction_results()
     println("Database table 'bids' has been updated with missing bid results values.")
 end
 
-notice_of_sale_path(case_number) = joinpath("web/saledocs/noticeofsale", replace(case_number, "/" => "-") * ".pdf")
+# Build path to Notice of Sale PDF for a given case number and auction date.
+# Prefer the dated filename (case-YYYY-MM-DD.pdf) when the date is known and file exists,
+# else fall back to legacy (case.pdf).
+function notice_of_sale_path(case_number::AbstractString, auction_date)
+    base = replace(case_number, "/" => "-")
+    if auction_date !== missing
+        dated = joinpath("web/saledocs/noticeofsale", string(base, "-", Dates.format(auction_date, dateformat"yyyy-mm-dd"), ".pdf"))
+        if isfile(dated)
+            return dated
+        end
+    end
+    return joinpath("web/saledocs/noticeofsale", base * ".pdf")
+end
 
 # Extract block/lot/address from file
 function parse_notice_of_sale(pdf_path)
@@ -280,8 +292,19 @@ function get_block_and_lot()
         SQLite.close(dbh)
     end
 
-    # Read in which files exist
-    files = readdir("web/saledocs/noticeofsale") .|> x -> replace(x[1:end-4], "-" => "/")
+    # Read which case_numbers have any NOS file present (support both legacy and dated names)
+    raw_files = readdir("web/saledocs/noticeofsale")
+    files = String[]
+    for f in raw_files
+        if endswith(lowercase(f), ".pdf")
+            stem = f[1:end-4]
+            # If ends with -YYYY-MM-DD, strip the date part
+            if occursin(r"-\d{4}-\d{2}-\d{2}$", stem)
+                stem = stem[1:end-11]
+            end
+            push!(files, replace(stem, "-" => "/"))
+        end
+    end
 
     filter!(row -> row.case_number in files, cases)
 
@@ -290,7 +313,7 @@ function get_block_and_lot()
     new_cases = antijoin(cases, lots, on=[:case_number, :borough])
 
     for case in eachrow(new_cases)
-        pdf_path = notice_of_sale_path(case.case_number)
+        pdf_path = notice_of_sale_path(case.case_number, case.auction_date)
         values = parse_notice_of_sale(pdf_path)
         if isnothing(values)
             continue

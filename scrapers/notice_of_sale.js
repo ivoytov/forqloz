@@ -26,13 +26,18 @@ function sleep(s) {
     return new Promise(resolve => setTimeout(resolve, s * 1000));
 }
 
-function missing_filings(index_number) {
+function missing_filings(index_number, auction_date) {
     const out = []
     for (const f in FilingType) {
         const { dir } = FilingType[f]
 
-        const filename = index_number.replace('/', '-') + ".pdf"
-        const pdfPath = path.resolve(`web/saledocs/${dir}/${filename}`);
+        const dateStr = (dir === FilingType.NOTICE_OF_SALE.dir && auction_date)
+            ? new Date(auction_date).toISOString().split('T')[0]
+            : null;
+        const dated = (dir === FilingType.NOTICE_OF_SALE.dir && dateStr)
+            ? `${index_number.replace('/', '-')}-${dateStr}.pdf`
+            : `${index_number.replace('/', '-')}.pdf`;
+        const pdfPath = path.resolve(`web/saledocs/${dir}/${dated}`);
         if (!existsSync(pdfPath)) {
             out.push(FilingType[f])
         }
@@ -143,9 +148,14 @@ export async function download_filing(index_number, county, auction_date, missin
         return { error: "case discontinued" }
     }
 
-    const filename = index_number.replace('/', '-') + ".pdf"
     for (const filing of missingFilings) {
         const { dir, id } = filing
+        const dateStr = (filing === FilingType.NOTICE_OF_SALE && auction_date)
+            ? auction_date.toISOString().split('T')[0]
+            : null;
+        const filename = (filing === FilingType.NOTICE_OF_SALE && dateStr)
+            ? `${index_number.replace('/', '-')}-${dateStr}.pdf`
+            : `${index_number.replace('/', '-')}.pdf`;
         const pdfPath = path.resolve(`web/saledocs/${dir}/${filename}`);
         if (!existsSync(pdfPath) && availableFilings.includes(id)) {
             await page.select('select#selDocumentType', id);

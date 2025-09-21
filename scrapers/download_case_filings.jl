@@ -40,9 +40,7 @@ function main()
     # First, download any pending PDFs discovered previously (parallelized)
     download_pdf_links(max_concurrency, is_local)
 
-    rows = get_data()
-	transform!(rows, :auction_date => ByRow(x -> Date(x, "yyyy-mm-dd")) => :auction_date)
-    
+    rows = get_data()    
 
     # Filter rows where :missing_filings contains FilingType[:NOTICE_OF_SALE]
     urgent_mask = coalesce.(rows.auction_date .>= today(), false)
@@ -73,7 +71,23 @@ const FilingType = Dict(
     :SURPLUS_MONEY_FORM => "surplusmoney"
 )
 
-get_filename(case_number) = replace(case_number, "/" => "-") * ".pdf"
+# Build expected filename for a given filing directory.
+# For Notice of Sale, include the auction_date in the filename so that
+# a date change will cause a new download to be required.
+function expected_filename(dir::AbstractString, case_number::AbstractString, auction_date)
+    base = replace(case_number, "/" => "-")
+    if dir == FilingType[:NOTICE_OF_SALE]
+        d = todate(auction_date)
+        if d === missing
+            # No date known; fall back to legacy naming
+            return base * ".pdf"
+        else
+            return string(base, "-", Dates.format(d, dateformat"yyyy-mm-dd"), ".pdf")
+        end
+    else
+        return base * ".pdf"
+    end
+end
 
 
 function download_pdf_links(max_concurrent_tasks::Int=4, show_progress_bar=false)
@@ -157,10 +171,9 @@ function missing_filings(case_number, auction_date)
         return []
     end
 
-    filename = get_filename(case_number)
-
     res = []
     for (key, dir) in FilingType
+        filename = expected_filename(dir, case_number, auction_date)
         pdfPath = joinpath("web/saledocs", dir, filename)
         if !isfile(pdfPath)
             push!(res, dir)
@@ -215,6 +228,11 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
     failed_jobs = 0
     running_tasks = 0
     finished_tasks = 0
+    # Track created docs per type
+    nos_downloaded = 0
+    smf_downloaded = 0
+    # Cache expected filings metadata per case for quick lookups on completion
+    meta = Dict{String, Tuple{Any, Vector{String}}}()
 
     if show_progress_bar
         pb = Progress(nrow(rows))
@@ -226,7 +244,7 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
 
     total = nrow(rows)
     for (idx, row) in enumerate(eachrow(rows))
-        show_progress_bar && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date),  ("#", "$idx/$total")])
+        show_progress_bar && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("#", "$idx/$total"), ("NOS", string(nos_downloaded)), ("SMF", string(smf_downloaded))])
         !show_progress_bar && println("$idx/$total === $(row.case_number) $(row.borough) ===")
 
         # Respect concurrency limit by waiting for a completion when pool is full
@@ -235,6 +253,20 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
             if exitcode != 0
                 failed_jobs += 1
                 @warn "Processing case #$finished_case_number failed!"
+            end
+            if exitcode == 0
+                ad, filings = meta[String(finished_case_number)]
+                for dir in filings
+                    fname = expected_filename(dir, String(finished_case_number), ad)
+                    path = joinpath("web/saledocs", dir, fname)
+                    if isfile(path)
+                        if dir == FilingType[:NOTICE_OF_SALE]
+                            nos_downloaded += 1
+                        elseif dir == FilingType[:SURPLUS_MONEY_FORM]
+                            smf_downloaded += 1
+                        end
+                    end
+                end
             end
             running_tasks -= 1
             finished_tasks += 1
@@ -245,12 +277,14 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
                 ad = todate(row.auction_date)
                 ad_str = ad === missing ? "" : Dates.format(ad, dateformat"yyyy-mm-dd")
                 args = [row.case_number, row.borough, ad_str, row.missing_filings...]
-                p = run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), out_stream, stderr), wait=true)
+                p = run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), devnull, devnull), wait=true)
                 put!(channel, (row.case_number, p.exitcode))
             end
         end
         push!(tasks, task)
         running_tasks += 1
+        # Save metadata for completion-time accounting
+        meta[String(row.case_number)] = (row.auction_date, String.(row.missing_filings))
 
         # Opportunistically drain any finished results to keep channel small
         while isready(channel)
@@ -258,6 +292,20 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
             if exitcode != 0
                 failed_jobs += 1
                 @warn "Processing case #$finished_case_number failed!"
+            end
+            if exitcode == 0
+                ad, filings = meta[String(finished_case_number)]
+                for dir in filings
+                    fname = expected_filename(dir, String(finished_case_number), ad)
+                    path = joinpath("web/saledocs", dir, fname)
+                    if isfile(path)
+                        if dir == FilingType[:NOTICE_OF_SALE]
+                            nos_downloaded += 1
+                        elseif dir == FilingType[:SURPLUS_MONEY_FORM]
+                            smf_downloaded += 1
+                        end
+                    end
+                end
             end
             running_tasks -= 1
             finished_tasks += 1
@@ -273,6 +321,20 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
         if exitcode != 0
             failed_jobs += 1
             @warn "Processing case #$finished_case_number failed!"
+        end
+        if exitcode == 0
+            ad, filings = meta[String(finished_case_number)]
+            for dir in filings
+                fname = expected_filename(dir, String(finished_case_number), ad)
+                path = joinpath("web/saledocs", dir, fname)
+                if isfile(path)
+                    if dir == FilingType[:NOTICE_OF_SALE]
+                        nos_downloaded += 1
+                    elseif dir == FilingType[:SURPLUS_MONEY_FORM]
+                        smf_downloaded += 1
+                    end
+                end
+            end
         end
         finished_tasks += 1
     end

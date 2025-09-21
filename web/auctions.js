@@ -166,7 +166,10 @@ const columnDefs = [
         headerName: "Case #",
         field: "case_number",
         cellRenderer: function (params) {
-            const filename = 'saledocs/noticeofsale/' + params.value.replace('/', '-') + '.pdf'
+            const dateStr = params.data.auction_date ? new Date(params.data.auction_date).toISOString().split('T')[0] : null;
+            const base = params.value.replace('/', '-')
+            const fname = dateStr ? `${base}-${dateStr}.pdf` : `${base}.pdf`
+            const filename = 'saledocs/noticeofsale/' + fname
             return `<a href="${filename}" target="_blank">` + params.value + '</a>'
         },
         minWidth: 140,
