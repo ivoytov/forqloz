@@ -85,7 +85,6 @@ export async function download_pdf(url, fileName) {
     console.log('PDF downloaded successfully'); 
     await file.close()
     await page.close()
-    process.exit(0)
 } 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -98,7 +97,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         setTimeout(() => {
             console.log('Active handles:', process._getActiveHandles());
             console.log('Active requests:', process._getActiveRequests());
-            process.exit(0);
-          }, 1000); // Give it a second to complete all I/O operations
+          process.exit(0);
+        }, 1000); // Give it a second to complete all I/O operations
     }
 }
