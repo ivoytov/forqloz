@@ -34,10 +34,11 @@ function missing_filings(index_number, auction_date) {
         const dateStr = (dir === FilingType.NOTICE_OF_SALE.dir && auction_date)
             ? new Date(auction_date).toISOString().split('T')[0]
             : null;
-        const dated = (dir === FilingType.NOTICE_OF_SALE.dir && dateStr)
-            ? `${index_number.replace('/', '-')}-${dateStr}.pdf`
-            : `${index_number.replace('/', '-')}.pdf`;
-        const pdfPath = path.resolve(`web/saledocs/${dir}/${dated}`);
+        const baseName = `${index_number.replace('/', '-')}.pdf`;
+        const relPath = (dir === FilingType.NOTICE_OF_SALE.dir && dateStr)
+            ? `${dir}/${dateStr}/${baseName}`
+            : `${dir}/${baseName}`;
+        const pdfPath = path.resolve(`web/saledocs/${relPath}`);
         if (!existsSync(pdfPath)) {
             out.push(FilingType[f])
         }
@@ -104,7 +105,7 @@ export async function download_filing(index_number, county, auction_date, missin
 
     const tableExists = await page.$("table.NewSearchResults");
     if (!tableExists) {
-        console.warn(`\n\n${index_number} couldn't find a valid case with this index (table missing)`);
+        // console.warn(`\n\n${index_number} couldn't find a valid case with this index (table missing)`);
         return { error: 'No case found' };
     }
 
@@ -117,7 +118,7 @@ export async function download_filing(index_number, county, auction_date, missin
             })
         ])
     } catch (e) {
-        console.warn(`\n\n${index_number} couldn't find a valid case with this index`)
+        // console.warn(`\n\n${index_number} couldn't find a valid case with this index`)
         return { error: 'Failed to find case in CEF' };
     }
 
@@ -153,10 +154,11 @@ export async function download_filing(index_number, county, auction_date, missin
         const dateStr = (filing === FilingType.NOTICE_OF_SALE && auction_date)
             ? auction_date.toISOString().split('T')[0]
             : null;
-        const filename = (filing === FilingType.NOTICE_OF_SALE && dateStr)
-            ? `${index_number.replace('/', '-')}-${dateStr}.pdf`
-            : `${index_number.replace('/', '-')}.pdf`;
-        const pdfPath = path.resolve(`web/saledocs/${dir}/${filename}`);
+        const baseName = `${index_number.replace('/', '-')}.pdf`;
+        const relPath = (filing === FilingType.NOTICE_OF_SALE && dateStr)
+            ? `${dir}/${dateStr}/${baseName}`
+            : `${dir}/${baseName}`;
+        const pdfPath = path.resolve(`web/saledocs/${relPath}`);
         if (!existsSync(pdfPath) && availableFilings.includes(id)) {
             await page.select('select#selDocumentType', id);
 
@@ -214,7 +216,7 @@ export async function download_filing(index_number, county, auction_date, missin
                 continue
             }
 
-            appendFile("web/foreclosures/download.csv", `${dir}/${filename},${downloadUrl}\n`, (err) => {
+            appendFile("web/foreclosures/download.csv", `${relPath},${downloadUrl}\n`, (err) => {
                 if (err) {
                     console.error('Failed to append to the file:', err);
                 }

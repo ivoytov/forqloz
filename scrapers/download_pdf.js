@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { connect } from 'puppeteer-core';
-import { open } from 'fs/promises'
+import { open, mkdir } from 'fs/promises'
+import path from 'path'
 
 const SBR_WS_ENDPOINT = `wss://${process.env.BRIGHTDATA_AUTH}@brd.superproxy.io:9222`;
 const endpoint = process.env.WSS ?? SBR_WS_ENDPOINT;
@@ -57,6 +58,12 @@ export async function download_pdf(url, fileName) {
         }); 
     }); 
     fileName = fileName ?? "test.pdf"
+    // Ensure parent directory exists for the target file
+    try {
+        await mkdir(path.dirname(fileName), { recursive: true });
+    } catch (e) {
+        // ignore if exists or cannot create; open() will fail if path invalid
+    }
     file = await open(fileName, 'w'); 
 
     console.log('Saving pdf stream to file...'); 
