@@ -223,11 +223,19 @@ end
 function notice_of_sale_path(case_number::AbstractString, auction_date)
     base = replace(case_number, "/" => "-")
     if auction_date !== missing
-        dated = joinpath("web/saledocs/noticeofsale", string(base, "-", Dates.format(auction_date, dateformat"yyyy-mm-dd"), ".pdf"))
-        if isfile(dated)
-            return dated
+        # New structure: web/saledocs/noticeofsale/YYYY-MM-DD/base.pdf
+        dated_dir = joinpath("web/saledocs/noticeofsale", Dates.format(auction_date, dateformat"yyyy-mm-dd"))
+        dated_path = joinpath(dated_dir, base * ".pdf")
+        if isfile(dated_path)
+            return dated_path
+        end
+        # Legacy structure: web/saledocs/noticeofsale/base-YYYY-MM-DD.pdf
+        legacy_dated = joinpath("web/saledocs/noticeofsale", string(base, "-", Dates.format(auction_date, dateformat"yyyy-mm-dd"), ".pdf"))
+        if isfile(legacy_dated)
+            return legacy_dated
         end
     end
+    # Fallback: legacy undated name in root
     return joinpath("web/saledocs/noticeofsale", base * ".pdf")
 end
 
@@ -292,17 +300,18 @@ function get_block_and_lot()
         SQLite.close(dbh)
     end
 
-    # Read which case_numbers have any NOS file present (support both legacy and dated names)
-    raw_files = readdir("web/saledocs/noticeofsale")
+    # Read which case_numbers have any NOS file present (support both legacy and new dated folder names)
     files = String[]
-    for f in raw_files
-        if endswith(lowercase(f), ".pdf")
-            stem = f[1:end-4]
-            # If ends with -YYYY-MM-DD, strip the date part
-            if occursin(r"-\d{4}-\d{2}-\d{2}$", stem)
-                stem = stem[1:end-11]
+    for (root, _, filelist) in walkdir("web/saledocs/noticeofsale")
+        for f in filelist
+            if endswith(lowercase(f), ".pdf")
+                stem = f[1:end-4]
+                # Legacy dated filename: base-YYYY-MM-DD.pdf -> strip suffix
+                if occursin(r"-\d{4}-\d{2}-\d{2}$", stem)
+                    stem = stem[1:end-11]
+                end
+                push!(files, replace(stem, "-" => "/"))
             end
-            push!(files, replace(stem, "-" => "/"))
         end
     end
 

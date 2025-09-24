@@ -32,13 +32,9 @@ function todate(x)
 end
 # Get filings. If WSS is set then we are running locally, otherwise on git.
 function main()
-    # Allow overriding concurrency via env var, else choose by environment
-    max_concurrency = tryparse(Int, get(ENV, "MAX_CONCURRENCY", ""))
-    is_local = haskey(ENV, "WSS")
-    max_concurrency = isnothing(max_concurrency) ? (is_local ? 4 : 8) : max_concurrency
-
+    
     # First, download any pending PDFs discovered previously (parallelized)
-    download_pdf_links(max_concurrency, is_local)
+    download_pdf_links()
 
     rows = get_data()    
 
@@ -52,17 +48,11 @@ function main()
     sampled_row_count = nrow(sampled_rows)
     println("Repo state: $urgent_row_count urgent cases, $sampled_row_count sampled rows outstanding")
 
-    if !is_local
-        max_docs = 100
-        urgent_rows = urgent_rows[1:min(nrow(urgent_rows), max_docs), :]
-        n = min(max_docs - nrow(urgent_rows), nrow(sampled_rows))
-        sampled_rows = sampled_rows[shuffle(1:nrow(sampled_rows))[1:n], :]
-    end
 
     # Combine the filtered rows with the randomly selected rows
     rows = vcat(urgent_rows, sampled_rows)
     println("Task list: $(nrow(urgent_rows)) urgent cases, $(nrow(sampled_rows)) sampled rows, $(nrow(rows)) total tasks")
-    process_data(rows, max_concurrency, is_local)
+    process_data(rows)
 end
 
 # Define the FilingType as a constant dictionary
@@ -82,7 +72,8 @@ function expected_filename(dir::AbstractString, case_number::AbstractString, auc
             # No date known; fall back to legacy naming
             return base * ".pdf"
         else
-            return string(base, "-", Dates.format(d, dateformat"yyyy-mm-dd"), ".pdf")
+            # Store in date subfolder: YYYY-MM-DD/base.pdf
+            return string(Dates.format(d, dateformat"yyyy-mm-dd"), "/", base, ".pdf")
         end
     else
         return base * ".pdf"
@@ -90,7 +81,7 @@ function expected_filename(dir::AbstractString, case_number::AbstractString, auc
 end
 
 
-function download_pdf_links(max_concurrent_tasks::Int=4, show_progress_bar=false)
+function download_pdf_links(max_concurrent_tasks::Int=4)
     download_path = "web/foreclosures/download.csv"
     if !isfile(download_path)
         return
@@ -111,13 +102,11 @@ function download_pdf_links(max_concurrent_tasks::Int=4, show_progress_bar=false
     running_tasks = 0
     chan = Channel{Tuple{String, Int}}(total)  # unblocking completion queue
 
-    pb = show_progress_bar ? Progress(total) : nothing
-    out_stream = show_progress_bar ? devnull : stdout
+    pb = Progress(total) 
 
     tasks = Task[]
     for (idx, row) in enumerate(eachrow(rows))
-        show_progress_bar && next!(pb; showvalues=[("PDF", row.filename), ("#", "$idx/$total")])
-        !show_progress_bar && println("[pdf] $idx/$total => $(row.filename)")
+        next!(pb; showvalues=[("PDF", row.filename), ("#", "$idx/$total")])
 
         # backpressure: wait until slot is free
         while running_tasks >= max_concurrent_tasks
@@ -132,7 +121,7 @@ function download_pdf_links(max_concurrent_tasks::Int=4, show_progress_bar=false
 
         task = @async begin
             path = joinpath("web/saledocs", row.filename)
-            p = run(pipeline(ignorestatus(`node scrapers/download_pdf.js $(row.url) $path`), out_stream, stderr), wait=true)
+            p = run(pipeline(ignorestatus(`node scrapers/download_pdf.js $(row.url) $path`), devnull, devnull), wait=true)
             put!(chan, (row.filename, p.exitcode))
         end
         push!(tasks, task)
@@ -160,7 +149,7 @@ function download_pdf_links(max_concurrent_tasks::Int=4, show_progress_bar=false
         end
         finished_tasks += 1
     end
-    show_progress_bar && finish!(pb)
+    finish!(pb)
     println("PDF downloads complete. Failed: $failed_jobs / $total")
 end
 
@@ -176,7 +165,19 @@ function missing_filings(case_number, auction_date)
         filename = expected_filename(dir, case_number, auction_date)
         pdfPath = joinpath("web/saledocs", dir, filename)
         if !isfile(pdfPath)
-            push!(res, dir)
+            if dir == "noticeofsale"
+                # if notice of sale, check path wihtout date
+                filename = expected_filename(dir, case_number, missing)
+                pdfPath = joinpath("web/saledocs", dir, filename)
+                if !isfile(pdfPath)
+                    push!(res, dir)
+                end
+            else
+                # if surplus money form, always just check the one path
+                push!(res, dir)
+            end
+        else
+            
         end
     end
     
@@ -209,8 +210,17 @@ function get_data()
     # Parse auction_date text to Date where possible
 	transform!(rows, :auction_date => ByRow(todate) => :auction_date)
 
-    # Keep deterministic order (most recent first)
-    sort!(rows, order(:auction_date), rev=true)
+    # Sort by borough priority, then by most recent auction date within each
+    BOROUGH_PRIORITY = Dict(
+        "Manhattan" => 1,
+        "Brooklyn" => 2,
+        "Queens" => 3,
+        "Bronx" => 4,
+        "Staten Island" => 5,
+    )
+    transform!(rows, :borough => ByRow(b -> get(BOROUGH_PRIORITY, String(b), 99)) => :borough_priority)
+    sort!(rows, [order(:borough_priority), order(:auction_date, rev=true)])
+    select!(rows, Not(:borough_priority))
 
     # Identify missing filings
     transform!(rows, [:case_number, :auction_date] => ByRow(missing_filings) => :missing_filings)
@@ -221,7 +231,7 @@ function get_data()
 end
 
 
-function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
+function process_data(rows, max_concurrent_tasks=4)
     tasks = Task[]
     # Use large-capacity channel to avoid blocking producers
     channel = Channel{Tuple{String, Int}}(max(1, nrow(rows)))
@@ -234,18 +244,12 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
     # Cache expected filings metadata per case for quick lookups on completion
     meta = Dict{String, Tuple{Any, Vector{String}}}()
 
-    if show_progress_bar
-        pb = Progress(nrow(rows))
-        out_stream = devnull
-    else
-        pb = nothing
-        out_stream = stdout
-    end
+ 
+    pb = Progress(nrow(rows))
 
     total = nrow(rows)
     for (idx, row) in enumerate(eachrow(rows))
-        show_progress_bar && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("#", "$idx/$total"), ("NOS", string(nos_downloaded)), ("SMF", string(smf_downloaded))])
-        !show_progress_bar && println("$idx/$total === $(row.case_number) $(row.borough) ===")
+        next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("#", "$idx/$total"), ("NOS", string(nos_downloaded)), ("SMF", string(smf_downloaded))])
 
         # Respect concurrency limit by waiting for a completion when pool is full
         while running_tasks >= max_concurrent_tasks
@@ -340,7 +344,7 @@ function process_data(rows, max_concurrent_tasks, show_progress_bar=false)
     end
     println("\nNumber of failed jobs: $failed_jobs")
 
-    show_progress_bar && finish!(pb)
+    finish!(pb)
 end
 
 # Main function
