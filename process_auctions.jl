@@ -21,6 +21,31 @@ function initialize_data()
     df
 end
 
+function spna_building_census()
+    ans = esri_query(url, ["BBL", "Address", "OwnerName", "OwnerType", "UnitsRes", "ResArea", "BldgClass", "YearBuilt", "YearAlter1", "YearAlter2", "Landmark", "CondoNo"], "Borough = 'MN' and (Block in (901, 900, 899, 898, 897, 896, 469, 468, 467, 453, 454, 455, 921, 922, 923, 924, 925, 926) and (UnitsRes >= 6 and BldgClass not in ('C6')))");
+    fields = ["BBL", "Address", "OwnerName", "OwnerType", "UnitsRes", "ResArea",
+          "BldgClass", "YearBuilt", "YearAlter1", "YearAlter2", "Landmark", "CondoNo"]
+
+    # Extract attributes from features
+    attrs = [feat["attributes"] for feat in ans]
+
+    function nothing_to_missing!(df,col)
+         for i in eachindex(df[!,col])
+           if isnothing(df[i, col])
+             df[i, col] = missing
+           end
+         end
+    end
+
+    # Build DataFrame with stable column order
+    df = DataFrame()
+    for c in names(df)
+        df[!, c] = replace(df[!, c], nothing => missing)
+    end
+
+    CSV.write("building_census.csv", df)
+end
+
 # Main function to calculate and export home price indices
 function main()
     sales = initialize_data()
