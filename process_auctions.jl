@@ -22,9 +22,13 @@ function initialize_data()
 end
 
 function spna_building_census()
-    ans = esri_query(url, ["BBL", "Address", "OwnerName", "OwnerType", "UnitsRes", "ResArea", "BldgClass", "YearBuilt", "YearAlter1", "YearAlter2", "Landmark", "CondoNo"], "Borough = 'MN' and (Block in (901, 900, 899, 898, 897, 896, 469, 468, 467, 453, 454, 455, 921, 922, 923, 924, 925, 926) and (UnitsRes >= 6 and BldgClass not in ('C6')))");
-    fields = ["BBL", "Address", "OwnerName", "OwnerType", "UnitsRes", "ResArea",
+    # Available fields at https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/ArcGIS/rest/services/MAPPLUTO/FeatureServer/0
+    fields = ["BoroCode", "Block", "Lot", "BBL", "Address", "OwnerName", "OwnerType", "UnitsRes", "ResArea",
           "BldgClass", "YearBuilt", "YearAlter1", "YearAlter2", "Landmark", "CondoNo"]
+    blocks = (901, 900, 899, 898, 897, 896, 469, 468, 467, 453, 454, 455, 921, 922, 923, 924, 925, 926)
+    # building classes https://www.nyc.gov/assets/finance/jump/hlpbldgcode.html
+    qry = "BoroCode = 1 and (Block in $blocks and (UnitsRes >= 6 and BldgClass not in ('C6', 'D4')))"
+    ans = esri_query(url, fields, qry);
 
     # Extract attributes from features
     attrs = [feat["attributes"] for feat in ans]
@@ -38,13 +42,21 @@ function spna_building_census()
     end
 
     # Build DataFrame with stable column order
-    df = DataFrame()
+    df = DataFrame(attrs)
     for c in names(df)
         df[!, c] = replace(df[!, c], nothing => missing)
     end
 
-    CSV.write("building_census.csv", df)
+    # registrations from https://data.cityofnewyork.us/Housing-Development/Multiple-Dwelling-Registrations/tesw-yqqr/about_data
+    reg_df = read_csv("registrations.csv")
+    # registration contacts from https://data.cityofnewyork.us/Housing-Development/Registration-Contacts/feu5-w2e2/about_data
+    contacts_df = read_csv("contacts.csv")
+    df2 = innerjoin(df, reg_df, on=[:BoroCode => :BoroID, :Block => :Block, :Lot => :Lot]);
+    innerjoin(df2, contacts_df, on=:RegistrationID)
+    CSV.write("building_census_contacts.csv", df)
 end
+
+
 
 # Main function to calculate and export home price indices
 function main()
