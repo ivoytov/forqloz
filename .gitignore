@@ -36,3 +36,5 @@ calendar_test.js
 scrapers/test.js
 *.sqlite-wal
 *.sqlite-shm
+HPD_Registration_Open_Data.pdf
+*.csv
