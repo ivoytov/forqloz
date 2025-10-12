@@ -46,7 +46,8 @@ function extract_block(text)
         r"\bBlock[:\s]+(\d{1,5})\b"i, 
         r"SBL\.?:?\s*(\d{3,5})-\d{1,4}"i,
         r"(?<!\(\d{3}\))\s(\d{3,5})-(\d{1,4})[.)]",
-        r"tax map identification\s(\d{3,5})-\d{1,4}"i,
+        r"tax map identification,?\s-?(\d{3,5})-\d{1,4}"i,
+        
     ]
     return extract_pattern(text, patterns)
 end
@@ -57,7 +58,7 @@ function extract_lot(text)
         r"\bLot(?:\(?s?\)?| No\.?)[:\s]+(\d{1,4})"i, 
         r"SBL\.?:?\s*(\d{3,5})-\d{1,4}"i,
         r"(?<!\(\d{3}\))\s\d{3,5}-(\d{1,4})[.)]",
-        r"tax map identification\s\d{3,5}-(\d{1,4})"i,
+        r"tax map identification,?\s-?\d{3,5}-(\d{1,4})"i,
 
     ]
     return extract_pattern(text, patterns)
