@@ -81,6 +81,7 @@ function main()
     # update pluto file
     pluto_data = DataFrame(DBInterface.execute(dbh, "SELECT * FROM pluto"))
     new_lots = antijoin(dropmissing(auctions, :BBL), pluto_data, on=:BBL)
+    subset!(new_lots, :BBL => ByRow(!=("")))
 
     # Iterate over each BBL in `auctions` and call the `pluto` function, storing the results in the DataFrame
     columns = ["Address", "Borough", "Block", "Lot", "ZipCode", "BldgClass", "LandUse", "BBL", "YearBuilt", "YearAlter1", "YearAlter2", "OwnerName", "LotArea", "BldgArea"]
@@ -173,7 +174,14 @@ function esri_query(url, outfields, query; format="JSON")
                  ["Content-Type" => "application/x-www-form-urlencoded", "accept"=>"application/json"],
                  HTTP.URIs.escapeuri(params))
     json = JSON3.read(String(r.body))
-    return json.features
+
+    if haskey(json, :error)
+        err = json[:error]
+        msg = haskey(err, :message) ? err[:message] : String(r.body)
+        throw(ErrorException("ESRI query failed: $msg params: $params"))
+    end
+
+    return json[:features]
 end
 
 function condo_billing_bbl(condo_base_bbl_key)
