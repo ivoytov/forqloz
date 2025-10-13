@@ -24,10 +24,42 @@ async function loadDB() {
         };
 
         const sales = run('SELECT * FROM auction_sales');
-        const auctions = run('SELECT * FROM cases');
-        const lots = run('SELECT * FROM lots');
-        const bids = run('SELECT * FROM bids');
-        const pluto = run('SELECT * FROM pluto');
+        const lots = run(`
+            SELECT
+                lots.case_number,
+                lots.borough,
+				boroughs.id as borough_id,
+				boroughs.code as borough_code,
+                lots.block,
+                lots.lot,
+                lots.address AS lot_address,
+                lots.BBL,
+                lots.unit,
+                cases.auction_date,
+                cases.case_name,
+                bids.judgement,
+                bids.upset_price,
+                bids.winning_bid,
+                CASE WHEN bids.winning_bid > 100 THEN bids.winning_bid - bids.upset_price END AS over_bid,
+                pluto.Address AS pluto_address,
+                pluto.ZipCode,
+                substr(building_class.name, 0, instr(building_class.name, ':')) as LandUse,
+                building_class.name as BldgClass,
+                pluto.OwnerName,
+                pluto.YearBuilt,
+                pluto.YearAlter1,
+                pluto.YearAlter2,
+                pluto.LotArea,
+                pluto.BldgArea
+            FROM lots
+            LEFT JOIN cases ON cases.case_number = lots.case_number AND cases.borough = lots.borough
+            LEFT JOIN bids ON bids.case_number = lots.case_number
+                AND bids.auction_date = cases.auction_date
+                AND bids.borough = lots.borough
+            LEFT JOIN pluto ON pluto.BBL = lots.BBL
+            LEFT JOIN building_class ON pluto.BldgClass = building_class.id
+			JOIN boroughs on lots.borough = boroughs.name;
+        `);
 
         // Convert date-like strings to Date objects to match CSV path behavior
         for (const s of sales) {
@@ -37,33 +69,20 @@ async function loadDB() {
             // Ensure numeric fields parsed as numbers where possible
             if (typeof s['SALE PRICE'] === 'string') s['SALE PRICE'] = Number(s['SALE PRICE']);
         }
-        for (const a of auctions) {
-            if (a['auction_date']) { const d = new Date(a['auction_date']); d.setHours(24,0,0,0); a['auction_date'] = d; }
-        }
-        for (const b of bids) {
-            if (b['auction_date']) { const d = new Date(b['auction_date']); d.setHours(24,0,0,0); b['auction_date'] = d; }
-            // Coerce numerics
-            ['judgement','upset_price','winning_bid'].forEach(k => { if (typeof b[k] === 'string') b[k] = Number(b[k]); });
-        }
-        for (const p of pluto) {
-            ['LandUse','Block','Lot','BBL','ZipCode','LotArea','BldgArea','YearBuilt','YearAlter1','YearAlter2'].forEach(k => {
-                if (k in p && typeof p[k] === 'string' && p[k] !== '') p[k] = Number(p[k]);
-            });
-        }
+
         for (const l of lots) {
-            ['block','lot','BBL'].forEach(k => { if (k in l && typeof l[k] === 'string' && l[k] !== '') l[k] = Number(l[k]); });
+            if (l.auction_date) {
+                const d = new Date(l.auction_date);
+                d.setHours(24,0,0,0);
+                l.auction_date = d;
+            }
         }
 
-        return { sales, auctions, lots, bids, pluto };
+        return { sales, lots };
     } catch (e) {
         console.error('Failed to load SQLite DB:', e);
         throw e;
     }
-}
-
-async function loadData() {
-    const { sales, auctions, lots, bids, pluto } = await loadDB();
-    return [sales, auctions, lots, bids, pluto];
 }
 
 
@@ -118,21 +137,7 @@ function applyFiltersFromURL(params = null) {
     gridApi.setFilterModel(filters);
 }
 
-const propertyInfoMapUrl = (borough, block, lot) => "https://propertyinformationportal.nyc.gov/parcels/" + (lot > 1000 ? "unit/" : "parcel/") + boroughIdFromName(borough) + block.toString().padStart(5, '0') + lot.toString().padStart(4, '0')
-
-const landUseMap = [
-    "One & Two Family Buildings",
-    "Multi-Family Walk-Up Buildings",
-    "Multi-Family Elevator Buildings",
-    "Mixed Residential & Commercial Buildings",
-    "Commercial & Office Buildings",
-    "Industrial & Manufacturing",
-    "Transportation & Utility",
-    "Public Facilities & Institutions",
-    "Open Space & Outdoor Recreation",
-    "Parking Facilities",
-    "Vacant Land",
-]
+const propertyInfoMapUrl = (BBL, lot) => "https://propertyinformationportal.nyc.gov/parcels/" + (lot > 1000 ? "unit/" : "parcel/") + BBL
 
 // grid columns
 const columnDefs = [
@@ -146,7 +151,7 @@ const columnDefs = [
     {
         headerName: "Class",
         field: "LandUse",
-        valueGetter: ({data}) => data.LandUse > 0 ? landUseMap[data.LandUse - 1] : "N/A",
+        valueFormatter: ({value}) => value ? toCapitalizedCase(value) : value,
         filter: 'agSetColumnFilter',
         maxWidth: 150,
     },
@@ -158,7 +163,7 @@ const columnDefs = [
     {
         headerName: "Address",
         field: "Address",
-        valueGetter: ({data}) => data.unit ? `${data.Address}, Unit ${data.unit}` : data.Address,
+        valueGetter: ({data}) => toCapitalizedCase(data.pluto_address ?? data.lot_address) + (data.unit ? `, Unit ${data.unit}` : ''),
         cellRenderer: 'agGroupCellRenderer',
         minWidth: 300,
     },
@@ -195,7 +200,7 @@ const columnDefs = [
         headerName: "BBL",
         type: "rightAligned",
         valueGetter: p => `${p.data.block}-${p.data.lot}`,
-        cellRenderer: (p) => `<a href="${propertyInfoMapUrl(p.data.borough, p.data.block, p.data.lot)}" target="_blank">` + p.value + `</a>`,
+        cellRenderer: (p) => `<a href="${propertyInfoMapUrl(p.data.BBL, p.data.lot)}" target="_blank">` + p.value + `</a>`,
         minWidth: 120,
     },
     {
@@ -254,12 +259,7 @@ function zoomToBlock(event) {
         return
     }
 
-
-    let borough = borough_code_dict[event.node.data.borough]; // Example: Manhattan
-    let block = event.node.data.block;
-    let lot = event.node.data.lot;
-    const key = `${borough}-${block}-${lot}`;
-    map.fitBounds(markers[key][0].getBounds(), { maxZoom: 15 })
+    map.fitBounds(markers[event.node.data.BBL][0].getBounds(), { maxZoom: 15 })
 
 }
 
@@ -279,8 +279,7 @@ function onGridFilterChanged() {
         if (!data.block || !data.borough || !data.lot) {
             return
         }
-        const boroughCode = borough_code_dict[data.borough]
-
+        
         const onClickTableZoom = () => {
             // Highlight the row in AG Grid
             gridApi.forEachNodeAfterFilterAndSort(function (node) {
@@ -300,12 +299,12 @@ function onGridFilterChanged() {
             .where(`BBL=${data.BBL}`)
             .run((error, featureCollection) => {
                 if (error) {
-                    console.error("Couldn't find geometry for BBL", boroughCode, data.BBL, error);
+                    console.error("Couldn't find geometry for BBL", data.borough_code, data.BBL, error);
                     return;
                 }
 
                 if (featureCollection.features.length == 0) {
-                    console.warn("failed to return any results", boroughCode, data.BBL)
+                    console.warn("failed to return any results", data.borough_code, data.BBL)
                     return;
                 }
 
@@ -340,11 +339,10 @@ function onGridFilterChanged() {
                 marker.on('click', onClickTableZoom)
 
                 // Store the marker in the markers object
-                const key = `${boroughCode}-${data.block}-${data.lot}`;
-                if (!markers[key]) {
-                    markers[key] = []
+                if (!markers[data.BBL]) {
+                    markers[data.BBL] = []
                 }
-                markers[key].push(layer);
+                markers[data.BBL].push(layer);
 
             });
     });
@@ -451,59 +449,44 @@ const gridApi = agGrid.createGrid(gridDiv, gridOptions)
 
 
 // Load from DB only
-loadData().then(([sales, auctions, lots, bids, pluto]) => {
+loadDB().then(({ sales, lots }) => {
     combinedData = sales
-    // get the address from transaction records
+
     for (const lot of lots) {
-        const auctionMatches = auctions.filter(({ case_number }) => case_number == lot.case_number)
-        if (!auctionMatches.length) {
-            console.warn("Couldn't find a match for lot", lot.case_number)
-            continue
-        }
+        if (lot.auction_date instanceof Date) {
+            const transactions = getTransactions(lot)
 
-        const auction = auctionMatches[0]
-        lot.auction_date = auction.auction_date
-        lot.case_name = auction.case_name
+            if (transactions.length > 0) {
+                const now = new Date()
+                if (now > lot.auction_date) {
+                    const millisecondsInADay = 24 * 60 * 60 * 1000
+                    lot.isSold = transactions.some(t => {
+                        const dayDifference = (t["SALE DATE"] - lot.auction_date) / millisecondsInADay
+                        return dayDifference >= 0 && dayDifference <= 90 && t["SALE PRICE"] > minTransactionPrice
+                    })
+                } else {
+                    lot.isSold = false
+                }
 
-
-
-        const result = bids.find(({ case_number, auction_date }) => (case_number == lot.case_number) && (auction_date.getTime() == lot.auction_date.getTime()))
-        if (result) {
-            lot.judgement = result.judgement
-            lot.upset_price = result.upset_price
-            lot.winning_bid = result.winning_bid
-
-            lot.over_bid = result.winning_bid > 100 ? result.winning_bid - result.upset_price : null
-        }
-
-        const transactions = getTransactions(lot)
-
-        if (transactions.length > 0) {
-            lot.isSold = new Date() > lot.auction_date ? transactions.some(t => {
-                const millisecondsInADay = 24 * 60 * 60 * 1000;
-                const dayDifference = (t["SALE DATE"] - lot.auction_date) / millisecondsInADay
-                return dayDifference >= 0 && dayDifference <= 90 && t["SALE PRICE"] > minTransactionPrice
-            }) : false
-            if (lot.winning_bid > 100) {
-                const last_sale = transactions[transactions.length - 1]
-                lot.price_change = lot.winning_bid / last_sale["SALE PRICE"] - 1
+                if (typeof lot.winning_bid === 'number' && lot.winning_bid > 100) {
+                    const last_sale = transactions[transactions.length - 1]
+                    if (last_sale && last_sale["SALE PRICE"]) {
+                        lot.price_change = lot.winning_bid / last_sale["SALE PRICE"] - 1
+                    }
+                }
+            } else {
+                lot.isSold = false
             }
-            
-
         } else {
             lot.isSold = false
         }
 
-        const plutoMatch = pluto.find(({ BBL }) => BBL == lot.BBL)
-        if (plutoMatch) {
-            lot.Address = toCapitalizedCase(plutoMatch.Address)
-            lot.ZipCode = plutoMatch.ZipCode
-            //Address,Borough,Block,Lot,ZipCode,BldgClass,LandUse,BBL,YearBuilt,YearAlter1,YearAlter2,OwnerName,LotArea,BldgArea
-            
-            lot.LandUse = plutoMatch.LandUse
+        if (typeof lot.winning_bid === 'number' && typeof lot.upset_price === 'number' && lot.winning_bid > 100) {
+            lot.over_bid = lot.over_bid ?? (lot.winning_bid - lot.upset_price)
+        } else {
+            lot.over_bid = null
         }
     }
-
 
     // load the full table
     gridApi.setGridOption('rowData', lots)
@@ -581,22 +564,6 @@ function getCentroid(geometry) {
             break;
     }
     return latlng;
-}
-
-const borough_dict = {
-    "1": "Manhattan",
-    "2": "Bronx",
-    "3": "Brooklyn",
-    "4": "Queens",
-    "5": "Staten Island",
-}
-
-const borough_code_dict = {
-    "Manhattan": "MN",
-    "Bronx": "BX",
-    "Brooklyn": "BK",
-    "Queens": "QN",
-    "Staten Island": "SI",
 }
 
 
