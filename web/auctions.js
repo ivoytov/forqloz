@@ -61,22 +61,6 @@ async function loadDB() {
 			JOIN boroughs on lots.borough = boroughs.name;
         `);
 
-        // Convert date-like strings to Date objects to match CSV path behavior
-        for (const s of sales) {
-            if (s['SALE DATE']) {
-                const d = new Date(s['SALE DATE']); d.setHours(24,0,0,0); s['SALE DATE'] = d;
-            }
-            // Ensure numeric fields parsed as numbers where possible
-            if (typeof s['SALE PRICE'] === 'string') s['SALE PRICE'] = Number(s['SALE PRICE']);
-        }
-
-        for (const l of lots) {
-            if (l.auction_date) {
-                const d = new Date(l.auction_date);
-                d.setHours(24,0,0,0);
-                l.auction_date = d;
-            }
-        }
 
         return { sales, lots };
     } catch (e) {
@@ -86,7 +70,9 @@ async function loadDB() {
 }
 
 
-function updateURLWithFilters(filters) {
+function updateURLWithFilters() {
+    const filters = gridApi.getFilterModel()
+
     const params = new URLSearchParams();
 
     Object.keys(filters).forEach(column => {
@@ -142,13 +128,6 @@ const propertyInfoMapUrl = (BBL, lot) => "https://propertyinformationportal.nyc.
 // grid columns
 const columnDefs = [
     {
-        headerName: "Sold?",
-        field: "isSold",
-        cellDataType: 'boolean',
-        filter: 'agSetColumnFilter',
-        maxWidth: 75,
-    },
-    {
         headerName: "Class",
         field: "LandUse",
         valueFormatter: ({value}) => value ? toCapitalizedCase(value) : value,
@@ -191,7 +170,8 @@ const columnDefs = [
         filterParams: {
             minValidYear: 2024,
             maxValidYear: 2025,
-            buttons: ["apply", "cancel"],
+            buttons: ["apply", "reset"],
+            inRangeInclusive: true,
             closeOnApply: true,
             maxNumConditions: 1,
         }
@@ -271,8 +251,7 @@ function boroughIdFromName(borough) {
 function onGridFilterChanged() {
     markerLayer.clearLayers()
     outlineLayer.clearLayers()
-    const allFilters = gridApi.getFilterModel()
-    updateURLWithFilters(allFilters);
+    updateURLWithFilters();
 
     // Get all displayed rows
     gridApi.forEachNodeAfterFilterAndSort(({ data }) => {
@@ -381,24 +360,6 @@ const gridOptions = {
         detailGridOptions: {
             columnDefs: [
                 {
-                    headerName: "Address", field: "ADDRESS",
-                    minWidth: 200,
-                },
-                {
-                    headerName: "Neighborhood", field: "NEIGHBORHOOD",
-                    filter: 'agSetColumnFilter'
-                },
-                {
-                    headerName: "Category", field: "BUILDING CLASS CATEGORY",
-                },
-                {
-                    headerName: "Apt #", field: "APARTMENT NUMBER",
-                },
-                {
-                    headerName: "Total Units", field: "TOTAL UNITS",
-                    filter: 'agNumberColumnFilter',
-                },
-                {
                     field: 'SALE DATE',
                     headerName: 'Sale Date',
                     filter: 'agDateColumnFilter',
@@ -452,41 +413,15 @@ const gridApi = agGrid.createGrid(gridDiv, gridOptions)
 loadDB().then(({ sales, lots }) => {
     combinedData = sales
 
-    for (const lot of lots) {
-        if (lot.auction_date instanceof Date) {
-            const transactions = getTransactions(lot)
+    lots.filter(({winning_bid}) => winning_bid > 100).forEach(lot => {
+        const transactions = getTransactions(lot)
 
-            if (transactions.length > 0) {
-                const now = new Date()
-                if (now > lot.auction_date) {
-                    const millisecondsInADay = 24 * 60 * 60 * 1000
-                    lot.isSold = transactions.some(t => {
-                        const dayDifference = (t["SALE DATE"] - lot.auction_date) / millisecondsInADay
-                        return dayDifference >= 0 && dayDifference <= 90 && t["SALE PRICE"] > minTransactionPrice
-                    })
-                } else {
-                    lot.isSold = false
-                }
+        if (transactions.length > 0) {
+            const last_sale = transactions[transactions.length - 1]
+            lot.price_change = lot.winning_bid / last_sale["SALE PRICE"] - 1
+        } 
 
-                if (typeof lot.winning_bid === 'number' && lot.winning_bid > 100) {
-                    const last_sale = transactions[transactions.length - 1]
-                    if (last_sale && last_sale["SALE PRICE"]) {
-                        lot.price_change = lot.winning_bid / last_sale["SALE PRICE"] - 1
-                    }
-                }
-            } else {
-                lot.isSold = false
-            }
-        } else {
-            lot.isSold = false
-        }
-
-        if (typeof lot.winning_bid === 'number' && typeof lot.upset_price === 'number' && lot.winning_bid > 100) {
-            lot.over_bid = lot.over_bid ?? (lot.winning_bid - lot.upset_price)
-        } else {
-            lot.over_bid = null
-        }
-    }
+    });
 
     // load the full table
     gridApi.setGridOption('rowData', lots)
