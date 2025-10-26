@@ -3,7 +3,11 @@ using CSV, DataFrames, ProgressMeter, OCReract, Dates, Printf, OpenAI, Base64, J
 DotEnv.load!()
 
 const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "foreclosures.sqlite"))
-db() = SQLite.DB(DB_PATH)
+function db()
+    conn = SQLite.DB(DB_PATH)
+    DBInterface.execute(conn, "PRAGMA journal_mode=DELETE;")
+    return conn
+end
 
 # Function to prompt with a default answer
 function prompt(question, default_answer)
