@@ -8,16 +8,29 @@ const execFileAsync = promisify(execFile);
 
 const BASE_DIR = path.resolve('web/saledocs/noticeofsale');
 
-const MONTH_PATTERN = [
+const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'
-].join('|');
+];
+const MONTH_PATTERN = MONTH_NAMES.join('|');
+const MONTH_INDICES = MONTH_NAMES.reduce((acc, name, index) => {
+  acc[name.toLowerCase()] = index;
+  return acc;
+}, {});
 
-const TIME_PATTERN = '\\d{1,2}:\\d{2}\\s*(?:[ap]\\.?m\\.?)?';
+const TIME_PATTERN = '(?<time>\\d{1,2}:\\d{2}\\s*(?:[ap]\\.?m\\.?)?)';
+
+const ORDINAL_PATTERN = '\\d{1,2}(?:st|nd|rd|th)?';
+
 const DATE_WITH_TIME_REGEX = new RegExp(
-  `(${MONTH_PATTERN})\\s+\\d{1,2},\\s+\\d{4}(?=,?\\s+(at\s+)?\\s+${TIME_PATTERN})`,
+  `(?:the\\s+(?<leadingDay>${ORDINAL_PATTERN})\\s+day\\s+of\\s+)?` + // optional “the 26th day of”
+  `(?<month>${MONTH_PATTERN})` +
+  `(?:\\s+(?<trailingDay>${ORDINAL_PATTERN}))?` +                   // keeps handling “September 5”
+  `\\s*,\\s*(?<year>\\d{4})` +
+  `\\s+(?:at\\s*)?${TIME_PATTERN}`,
   'i'
 );
+
 
 async function extractText(pdfPath) {
   try {
@@ -33,9 +46,87 @@ function sanitizeWhitespace(value) {
   return value.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function formatDateDirectory(rawDate) {
-  const date = new Date(rawDate);
-  if (Number.isNaN(date.getTime())) {
+function stripOrdinalSuffix(value) {
+  return value ? value.replace(/(st|nd|rd|th)$/i, '') : value;
+}
+
+function parseTimeComponents(raw) {
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.replace(/\./g, '').replace(/\s+/g, '').toUpperCase();
+  const timeMatch = cleaned.match(/^(\d{1,2}):(\d{2})(AM|PM)?$/);
+  if (!timeMatch) {
+    return null;
+  }
+
+  let hour = parseInt(timeMatch[1], 10);
+  const minute = parseInt(timeMatch[2], 10);
+  const meridiem = timeMatch[3];
+
+  if (Number.isNaN(hour) || Number.isNaN(minute) || minute > 59) {
+    return null;
+  }
+
+  if (meridiem) {
+    if (hour === 12) {
+      hour = meridiem === 'AM' ? 0 : 12;
+    } else if (meridiem === 'PM') {
+      hour += 12;
+    }
+  } else if (hour >= 24) {
+    return null;
+  }
+
+  return { hour, minute };
+}
+
+function parseDateFromMatch(match) {
+  if (!match?.groups) {
+    return null;
+  }
+
+  const { leadingDay, trailingDay, month, year, time } = match.groups;
+  const dayToken = trailingDay ?? leadingDay;
+  if (!dayToken) {
+    return null;
+  }
+
+  const day = parseInt(stripOrdinalSuffix(dayToken), 10);
+  if (!Number.isInteger(day) || day < 1 || day > 31) {
+    return null;
+  }
+
+  const monthIndex = MONTH_INDICES[month.toLowerCase()];
+  if (monthIndex === undefined) {
+    return null;
+  }
+
+  const parsedYear = parseInt(year, 10);
+  if (!Number.isInteger(parsedYear)) {
+    return null;
+  }
+
+  const timeComponents = parseTimeComponents(time);
+  if (!timeComponents) {
+    return null;
+  }
+
+  const date = new Date(
+    parsedYear,
+    monthIndex,
+    day,
+    timeComponents.hour,
+    timeComponents.minute,
+    0,
+    0
+  );
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatDateDirectory(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
     return null;
   }
   return date.toISOString().split('T')[0];
@@ -44,6 +135,8 @@ function formatDateDirectory(rawDate) {
 async function ensureDirectory(dirPath) {
   await mkdir(dirPath, { recursive: true });
 }
+
+const DEBUG = false
 
 async function collectPdfFiles(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -62,17 +155,30 @@ async function collectPdfFiles(dir) {
 
 async function processPdf(filePath) {
   const text = await extractText(filePath);
+
   if (!text) {
     return { relativePath: path.relative(BASE_DIR, filePath), status: 'failed', reason: 'text_extraction_failed' };
   }
 
   const normalizedText = sanitizeWhitespace(text);
+    if (DEBUG) {
+    console.log(normalizedText)
+  }
   const match = normalizedText.match(DATE_WITH_TIME_REGEX);
   if (!match) {
     return { relativePath: path.relative(BASE_DIR, filePath), status: 'skipped', reason: 'no_date_with_time' };
   }
 
-  const dateDirectory = formatDateDirectory(match[0]);
+  if (DEBUG) {
+    console.log(`Matched date: ${match[0]}`);
+  }
+
+  const parsedDate = parseDateFromMatch(match);
+  if (!parsedDate) {
+    return { relativePath: path.relative(BASE_DIR, filePath), status: 'skipped', reason: 'invalid_date_components' };
+  }
+
+  const dateDirectory = formatDateDirectory(parsedDate);
   if (!dateDirectory) {
     return { relativePath: path.relative(BASE_DIR, filePath), status: 'skipped', reason: 'invalid_date' };
   }
@@ -100,7 +206,7 @@ async function processPdf(filePath) {
 }
 
 async function main() {
-  const pdfFiles = await collectPdfFiles(BASE_DIR);
+  const pdfFiles = DEBUG ? ["/Users/ilya/code/forqloz/web/saledocs/noticeofsale/1946-2009.pdf"] : await collectPdfFiles(BASE_DIR);
 
   if (pdfFiles.length === 0) {
     console.log('No PDF files found in the notice of sale directory.');
