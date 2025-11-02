@@ -22,14 +22,25 @@ const TIME_PATTERN = '(?<time>\\d{1,2}:\\d{2}\\s*(?:[ap]\\.?m\\.?)?)';
 
 const ORDINAL_PATTERN = '\\d{1,2}(?:st|nd|rd|th)?';
 
-const DATE_WITH_TIME_REGEX = new RegExp(
+const MONTH_NAME_DATE_REGEX = new RegExp(
   `(?:the\\s+(?<leadingDay>${ORDINAL_PATTERN})\\s+day\\s+of\\s+)?` + // optional “the 26th day of”
   `(?<month>${MONTH_PATTERN})` +
   `(?:\\s+(?<trailingDay>${ORDINAL_PATTERN}))?` +                   // keeps handling “September 5”
   `\\s*,\\s*(?<year>\\d{4})` +
-  `\\s+(?:at\\s*)?${TIME_PATTERN}`,
+  `\\s+at\\s*${TIME_PATTERN}`,
   'i'
 );
+
+const NUMERIC_DATE_REGEX = new RegExp(
+  `(?:on\\s+)?(?<monthNum>\\d{1,2})[\\/](?<dayNum>\\d{1,2})[\\/](?<year>\\d{4})` +
+  `\\s+at\\s*${TIME_PATTERN}`,
+  'i'
+);
+
+const DATE_PATTERNS = [
+  { type: 'monthName', regex: MONTH_NAME_DATE_REGEX },
+  { type: 'numeric', regex: NUMERIC_DATE_REGEX },
+];
 
 
 async function extractText(pdfPath) {
@@ -81,33 +92,53 @@ function parseTimeComponents(raw) {
   return { hour, minute };
 }
 
-function parseDateFromMatch(match) {
+function parseDateFromMatch(match, type) {
   if (!match?.groups) {
     return null;
   }
 
-  const { leadingDay, trailingDay, month, year, time } = match.groups;
-  const dayToken = trailingDay ?? leadingDay;
-  if (!dayToken) {
+  let day;
+  let monthIndex;
+  let parsedYear;
+
+  if (type === 'monthName') {
+    const { leadingDay, trailingDay, month, year } = match.groups;
+    const dayToken = trailingDay ?? leadingDay;
+    if (!dayToken) {
+      return null;
+    }
+    day = parseInt(stripOrdinalSuffix(dayToken), 10);
+    if (!Number.isInteger(day) || day < 1 || day > 31) {
+      return null;
+    }
+
+    monthIndex = MONTH_INDICES[month.toLowerCase()];
+    if (monthIndex === undefined) {
+      return null;
+    }
+
+    parsedYear = parseInt(year, 10);
+  } else if (type === 'numeric') {
+    const { monthNum, dayNum, year } = match.groups;
+    monthIndex = parseInt(monthNum, 10) - 1;
+    day = parseInt(dayNum, 10);
+    parsedYear = parseInt(year, 10);
+
+    if (!Number.isInteger(monthIndex) || monthIndex < 0 || monthIndex > 11) {
+      return null;
+    }
+    if (!Number.isInteger(day) || day < 1 || day > 31) {
+      return null;
+    }
+  } else {
     return null;
   }
 
-  const day = parseInt(stripOrdinalSuffix(dayToken), 10);
-  if (!Number.isInteger(day) || day < 1 || day > 31) {
-    return null;
-  }
-
-  const monthIndex = MONTH_INDICES[month.toLowerCase()];
-  if (monthIndex === undefined) {
-    return null;
-  }
-
-  const parsedYear = parseInt(year, 10);
   if (!Number.isInteger(parsedYear)) {
     return null;
   }
 
-  const timeComponents = parseTimeComponents(time);
+  const timeComponents = parseTimeComponents(match.groups.time);
   if (!timeComponents) {
     return null;
   }
@@ -136,7 +167,10 @@ async function ensureDirectory(dirPath) {
   await mkdir(dirPath, { recursive: true });
 }
 
-const DEBUG = false
+const DEBUG = false;
+const DEBUG_FILES = [
+  '/Users/ilya/code/forqloz/web/saledocs/noticeofsale/2331-2009.pdf',
+];
 
 async function collectPdfFiles(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -161,11 +195,21 @@ async function processPdf(filePath) {
   }
 
   const normalizedText = sanitizeWhitespace(text);
-    if (DEBUG) {
-    console.log(normalizedText)
+  if (DEBUG) {
+    console.log(normalizedText);
   }
-  const match = normalizedText.match(DATE_WITH_TIME_REGEX);
-  if (!match) {
+
+  let match = null;
+  let matchedPattern = null;
+  for (const pattern of DATE_PATTERNS) {
+    match = pattern.regex.exec(normalizedText);
+    if (match) {
+      matchedPattern = pattern;
+      break;
+    }
+  }
+
+  if (!match || !matchedPattern) {
     return { relativePath: path.relative(BASE_DIR, filePath), status: 'skipped', reason: 'no_date_with_time' };
   }
 
@@ -173,7 +217,7 @@ async function processPdf(filePath) {
     console.log(`Matched date: ${match[0]}`);
   }
 
-  const parsedDate = parseDateFromMatch(match);
+  const parsedDate = parseDateFromMatch(match, matchedPattern.type);
   if (!parsedDate) {
     return { relativePath: path.relative(BASE_DIR, filePath), status: 'skipped', reason: 'invalid_date_components' };
   }
@@ -206,7 +250,7 @@ async function processPdf(filePath) {
 }
 
 async function main() {
-  const pdfFiles = DEBUG ? ["/Users/ilya/code/forqloz/web/saledocs/noticeofsale/1946-2009.pdf"] : await collectPdfFiles(BASE_DIR);
+  const pdfFiles = DEBUG ? DEBUG_FILES : await collectPdfFiles(BASE_DIR);
 
   if (pdfFiles.length === 0) {
     console.log('No PDF files found in the notice of sale directory.');
