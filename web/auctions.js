@@ -152,7 +152,7 @@ const columnDefs = [
         cellRenderer: function (params) {
             const dateStr = params.data.auction_date ? new Date(params.data.auction_date).toISOString().split('T')[0] : null;
             const base = params.value.replace('/', '-')
-            const filename = dateStr
+            const filename = dateStr >= '2025-09-24'
                 ? `saledocs/noticeofsale/${dateStr}/${base}.pdf`
                 : `saledocs/noticeofsale/${base}.pdf`;
             return `<a href="${filename}" target="_blank">` + params.value + '</a>'
