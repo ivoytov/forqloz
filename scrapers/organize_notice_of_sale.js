@@ -27,7 +27,7 @@ const MONTH_NAME_DATE_REGEX = new RegExp(
   `(?<month>${MONTH_PATTERN})` +
   `(?:\\s+(?<trailingDay>${ORDINAL_PATTERN}))?` +                   // keeps handling “September 5”
   `\\s*,\\s*(?<year>\\d{4}),?` +
-  `\\s+at\\s*${TIME_PATTERN}`,
+  `\\s+at\\s*(?:${TIME_PATTERN}|Room)`,
   'i'
 );
 
@@ -103,6 +103,7 @@ function parseDateFromMatch(match, type) {
 
   if (type === 'monthName') {
     const { leadingDay, trailingDay, month, year } = match.groups;
+    if (DEBUG) { console.log(`${leadingDay}, ${trailingDay}, ${month}, ${year}`); }
     const dayToken = trailingDay ?? leadingDay;
     if (!dayToken) {
       return null;
@@ -120,6 +121,7 @@ function parseDateFromMatch(match, type) {
     parsedYear = parseInt(year, 10);
   } else if (type === 'numeric') {
     const { monthNum, dayNum, year } = match.groups;
+    if (DEBUG) { console.log(`${monthNum}, ${dayNum}, ${year}`); }
     monthIndex = parseInt(monthNum, 10) - 1;
     day = parseInt(dayNum, 10);
     parsedYear = parseInt(year, 10);
@@ -138,9 +140,9 @@ function parseDateFromMatch(match, type) {
     return null;
   }
 
-  const timeComponents = parseTimeComponents(match.groups.time);
+  let timeComponents = parseTimeComponents(match.groups.time);
   if (!timeComponents) {
-    return null;
+    timeComponents = { hour: 14, minute: 30 };
   }
 
   const date = new Date(
@@ -169,7 +171,7 @@ async function ensureDirectory(dirPath) {
 
 const DEBUG = false;
 const DEBUG_FILES = [
-  'web/saledocs/noticeofsale/3789-2009.pdf',
+  'web/saledocs/noticeofsale/4028-2013.pdf',
 ];
 
 async function collectPdfFiles(dir) {
