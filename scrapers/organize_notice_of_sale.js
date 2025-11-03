@@ -237,6 +237,7 @@ async function processPdf(filePath) {
   }
 
   if (fs.existsSync(targetPath)) {
+    unlink(filePath)
     return { relativePath: path.relative(BASE_DIR, filePath), status: 'already_exists' };
 
   }
