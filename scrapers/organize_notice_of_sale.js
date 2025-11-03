@@ -26,7 +26,7 @@ const MONTH_NAME_DATE_REGEX = new RegExp(
   `(?:the\\s+(?<leadingDay>${ORDINAL_PATTERN})\\s+day\\s+of\\s+)?` + // optional “the 26th day of”
   `(?<month>${MONTH_PATTERN})` +
   `(?:\\s+(?<trailingDay>${ORDINAL_PATTERN}))?` +                   // keeps handling “September 5”
-  `\\s*,\\s*(?<year>\\d{4})` +
+  `\\s*,\\s*(?<year>\\d{4}),?` +
   `\\s+at\\s*${TIME_PATTERN}`,
   'i'
 );
@@ -169,7 +169,7 @@ async function ensureDirectory(dirPath) {
 
 const DEBUG = false;
 const DEBUG_FILES = [
-  '/Users/ilya/code/forqloz/web/saledocs/noticeofsale/2331-2009.pdf',
+  'web/saledocs/noticeofsale/3789-2009.pdf',
 ];
 
 async function collectPdfFiles(dir) {
