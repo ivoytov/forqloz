@@ -23,11 +23,12 @@ const TIME_PATTERN = '(?<time>\\d{1,2}:\\d{2}\\s*(?:[ap]\\.?m\\.?)?)';
 const ORDINAL_PATTERN = '\\d{1,2}(?:st|nd|rd|th)?';
 
 const MONTH_NAME_DATE_REGEX = new RegExp(
-  `(?:the\\s+(?<leadingDay>${ORDINAL_PATTERN})\\s+day\\s+of\\s+)?` + // optional “the 26th day of”
+  // `(?:the\\s+(?<leadingDay>${ORDINAL_PATTERN})\\s+day\\s+of\\s+)?` + // optional “the 26th day of”
+  `on\\s+` +
   `(?<month>${MONTH_PATTERN})` +
   `(?:\\s+(?<trailingDay>${ORDINAL_PATTERN}))?` +                   // keeps handling “September 5”
   `\\s*,\\s*(?<year>\\d{4}),?` +
-  `\\s+at\\s*(?:${TIME_PATTERN}|Room)`,
+  `\\s+at\\s*(?:${TIME_PATTERN}|Room|situate)`,
   'i'
 );
 
@@ -171,7 +172,7 @@ async function ensureDirectory(dirPath) {
 
 const DEBUG = false;
 const DEBUG_FILES = [
-  'web/saledocs/noticeofsale/4028-2013.pdf',
+  'web/saledocs/noticeofsale/25457-2019E.pdf',
 ];
 
 async function collectPdfFiles(dir) {
