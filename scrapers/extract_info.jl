@@ -223,25 +223,63 @@ function get_auction_results()
 end
 
 # Build path to Notice of Sale PDF for a given case number and auction date.
-# Prefer the dated filename (case-YYYY-MM-DD.pdf) when the date is known and file exists,
-# else fall back to legacy (case.pdf).
+# Files now live at web/saledocs/noticeofsale/YYYY-MM-DD/<case>.pdf, but we keep
+# backward-compatible fallbacks to older flat naming schemes.
 function notice_of_sale_path(case_number::AbstractString, auction_date)
     base = replace(case_number, "/" => "-")
+    file_name = base * ".pdf"
+    root = joinpath("web", "saledocs", "noticeofsale")
+
+    if !isdir(root)
+        return joinpath(root, file_name)
+    end
+
     if auction_date !== missing
-        # New structure: web/saledocs/noticeofsale/YYYY-MM-DD/base.pdf
-        dated_dir = joinpath("web/saledocs/noticeofsale", Dates.format(auction_date, dateformat"yyyy-mm-dd"))
-        dated_path = joinpath(dated_dir, base * ".pdf")
+        dated_dir = joinpath(root, Dates.format(auction_date, dateformat"yyyy-mm-dd"))
+        dated_path = joinpath(dated_dir, file_name)
         if isfile(dated_path)
             return dated_path
         end
-        # Legacy structure: web/saledocs/noticeofsale/base-YYYY-MM-DD.pdf
-        legacy_dated = joinpath("web/saledocs/noticeofsale", string(base, "-", Dates.format(auction_date, dateformat"yyyy-mm-dd"), ".pdf"))
+    end
+
+    # Search dated subdirectories newest-first for a matching file.
+    dated_dirs = readdir(root; join=true)
+    candidates = Tuple{Date,String}[]
+    for dir_path in dated_dirs
+        isdir(dir_path) || continue
+        folder_name = basename(dir_path)
+        dir_date = tryparse(Date, folder_name, dateformat"yyyy-mm-dd")
+        dir_date === nothing && continue
+        candidate = joinpath(dir_path, file_name)
+        if isfile(candidate)
+            push!(candidates, (dir_date, candidate))
+        end
+    end
+    if !isempty(candidates)
+        sort!(candidates; by=first, rev=true)
+        _, path = first(candidates)
+        return path
+    end
+
+    # If no dated directory had the file, look in any remaining subdirectories.
+    for dir_path in dated_dirs
+        isdir(dir_path) || continue
+        candidate = joinpath(dir_path, file_name)
+        if isfile(candidate)
+            return candidate
+        end
+    end
+
+    # Legacy structure: web/saledocs/noticeofsale/base-YYYY-MM-DD.pdf
+    if auction_date !== missing
+        legacy_dated = joinpath(root, string(base, "-", Dates.format(auction_date, dateformat"yyyy-mm-dd"), ".pdf"))
         if isfile(legacy_dated)
             return legacy_dated
         end
     end
+
     # Fallback: legacy undated name in root
-    return joinpath("web/saledocs/noticeofsale", base * ".pdf")
+    return joinpath(root, file_name)
 end
 
 # Extract block/lot/address from file
