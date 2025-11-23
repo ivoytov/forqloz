@@ -11,7 +11,7 @@ borough_id_dict = Dict("Manhattan" => "1", "Bronx"=>"2", "Brooklyn"=>"3", "Queen
 
 # Initialize and preprocess datasets
 function initialize_data()
-    base_df = read_csv("../manhattan/transactions/nyc_2018-2022.csv")
+    base_df = read_csv("../manhattan/transactions/nyc_sales_2018-2022.csv")
     archives = [read_csv("../manhattan/transactions/nyc_sales_$(year).csv") for year in 2003:2017]
     rolling_sales = reduce(vcat, [read_csv("../manhattan/transactions/$borough.csv") for borough in ["manhattan", "bronx", "brooklyn", "queens", "statenisland"]])
     rolling_sales = filter(["SALE DATE"] => >(Date(2022, 12, 31)), rolling_sales)
