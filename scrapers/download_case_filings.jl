@@ -1,8 +1,9 @@
-using CSV, DataFrames, ProgressMeter, Base.Threads, Dates, Random, DotEnv, SQLite, DBInterface
+using DataFrames, ProgressMeter, Dates, DotEnv, SQLite, DBInterface
 
 DotEnv.load!()
 # SQLite DB location (shared with other tools)
 const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "foreclosures.sqlite"))
+const CASE_LOG_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "cases.log"))
 db() = SQLite.DB(DB_PATH)
 
 # Parse many common date representations into Date; return missing if unknown
@@ -30,12 +31,28 @@ function todate(x)
     end
     return missing
 end
+
+function discontinued_cases()
+    if !isfile(CASE_LOG_PATH)
+        return Set{String}()
+    end
+    discontinued = Set{String}()
+    for line in eachline(CASE_LOG_PATH)
+        stripped = strip(line)
+        isempty(stripped) && continue
+        parts = split(stripped; limit=2)
+        length(parts) < 2 && continue
+        case_number = strip(parts[1])
+        status = lowercase(strip(parts[2]))
+        if status == "discontinued"
+            push!(discontinued, case_number)
+        end
+    end
+    return discontinued
+end
 # Get filings. If WSS is set then we are running locally, otherwise on git.
 function main()
     
-    # First, download any pending PDFs discovered previously (parallelized)
-    download_pdf_links()
-
     rows = get_data()    
 
     # Filter rows where :missing_filings contains FilingType[:NOTICE_OF_SALE]
@@ -78,79 +95,6 @@ function expected_filename(dir::AbstractString, case_number::AbstractString, auc
     else
         return base * ".pdf"
     end
-end
-
-
-function download_pdf_links(max_concurrent_tasks::Int=4)
-    download_path = "web/foreclosures/download.csv"
-    if !isfile(download_path)
-        return
-    end
-    rows = CSV.read(download_path, DataFrame)
-    # Only attempt those not on disk yet
-    filter!(:filename => filename -> !isfile(joinpath("web/saledocs", filename)), rows)
-    # Persist filtered queue back so restarts pick up remaining work
-    CSV.write(download_path, rows)
-
-    total = nrow(rows)
-    if total == 0
-        return
-    end
-
-    failed_jobs = 0
-    finished_tasks = 0
-    running_tasks = 0
-    chan = Channel{Tuple{String, Int}}(total)  # unblocking completion queue
-
-    pb = Progress(total) 
-
-    tasks = Task[]
-    for (idx, row) in enumerate(eachrow(rows))
-        next!(pb; showvalues=[("PDF", row.filename), ("#", "$idx/$total")])
-
-        # backpressure: wait until slot is free
-        while running_tasks >= max_concurrent_tasks
-            finished_filename, exitcode = take!(chan)
-            if exitcode != 0
-                failed_jobs += 1
-                @warn "PDF download failed for $finished_filename"
-            end
-            running_tasks -= 1
-            finished_tasks += 1
-        end
-
-        task = @async begin
-            path = joinpath("web/saledocs", row.filename)
-            p = run(pipeline(ignorestatus(`node scrapers/download_pdf.js $(row.url) $path`), devnull, devnull), wait=true)
-            put!(chan, (row.filename, p.exitcode))
-        end
-        push!(tasks, task)
-        running_tasks += 1
-
-        # opportunistically drain completions so the channel does not fill
-        while isready(chan)
-            finished_filename, exitcode = take!(chan)
-            if exitcode != 0
-                failed_jobs += 1
-                @warn "PDF download failed for $finished_filename"
-            end
-            running_tasks -= 1
-            finished_tasks += 1
-        end
-    end
-
-    # Wait for all to finish
-    foreach(wait, tasks)
-    while finished_tasks < total
-        finished_filename, exitcode = take!(chan)
-        if exitcode != 0
-            failed_jobs += 1
-            @warn "PDF download failed for $finished_filename"
-        end
-        finished_tasks += 1
-    end
-    finish!(pb)
-    println("PDF downloads complete. Failed: $failed_jobs / $total")
 end
 
 # Function to find missing filings
@@ -207,6 +151,14 @@ function get_data()
     rows = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough, auction_date FROM cases"))
     SQLite.close(dbh)
 
+    skipped_cases = discontinued_cases()
+    if !isempty(skipped_cases)
+        original = nrow(rows)
+        filter!(row -> !(String(row.case_number) in skipped_cases), rows)
+        removed = original - nrow(rows)
+        removed > 0 && println("Skipping $removed discontinued cases from log")
+    end
+
     # Parse auction_date text to Date where possible
 	transform!(rows, :auction_date => ByRow(todate) => :auction_date)
 
@@ -230,7 +182,7 @@ function get_data()
     return rows
 end
 
-
+const DEBUG = true
 function process_data(rows, max_concurrent_tasks=4)
     tasks = Task[]
     # Use large-capacity channel to avoid blocking producers
@@ -244,12 +196,13 @@ function process_data(rows, max_concurrent_tasks=4)
     # Cache expected filings metadata per case for quick lookups on completion
     meta = Dict{String, Tuple{Any, Vector{String}}}()
 
- 
-    pb = Progress(nrow(rows))
+    !DEBUG && ( pb = Progress(nrow(rows)))
 
     total = nrow(rows)
     for (idx, row) in enumerate(eachrow(rows))
-        next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("#", "$idx/$total"), ("NOS", string(nos_downloaded)), ("SMF", string(smf_downloaded))])
+        
+        !DEBUG && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("#", "$idx/$total"), ("NOS", string(nos_downloaded)), ("SMF", string(smf_downloaded))])
+        
 
         # Respect concurrency limit by waiting for a completion when pool is full
         while running_tasks >= max_concurrent_tasks
@@ -281,7 +234,7 @@ function process_data(rows, max_concurrent_tasks=4)
                 ad = todate(row.auction_date)
                 ad_str = ad === missing ? "" : Dates.format(ad, dateformat"yyyy-mm-dd")
                 args = [row.case_number, row.borough, ad_str, row.missing_filings...]
-                p = run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), devnull, devnull), wait=true)
+                p = run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), stdout, stderr), wait=true)
                 put!(channel, (row.case_number, p.exitcode))
             end
         end
@@ -344,7 +297,7 @@ function process_data(rows, max_concurrent_tasks=4)
     end
     println("\nNumber of failed jobs: $failed_jobs")
 
-    finish!(pb)
+    !DEBUG && finish!(pb)
 end
 
 # Main function

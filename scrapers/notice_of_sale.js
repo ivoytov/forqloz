@@ -168,7 +168,7 @@ export async function download_filing(index_number, county, auction_date, missin
                     console.log(`Case ${index_number} Motion to Discontinue detected`)
                 }
             });
-            return finish({ error: "case discontinued" })
+            return finish({ ok: true })
         }
 
         for (const filing of missingFilings) {
@@ -232,7 +232,7 @@ export async function download_filing(index_number, county, auction_date, missin
 
 
                 if (docs.length == 0) {
-                    return finish({ error: 'No valid document links available' });
+                    return finish({ ok: true });
                 }
 
                 const receivedDate = new Date(docs[0].receivedDate)
@@ -257,12 +257,6 @@ export async function download_filing(index_number, county, auction_date, missin
                     console.log(index_number, `Found NOS with received date ${receivedDate.toISOString().split('T')[0]}, but subtitle indicates cancellation; SKIPPING`)
                     continue
                 }
-
-                appendFile("web/foreclosures/download.csv", `${relPath},${downloadUrl}\n`, (err) => {
-                    if (err) {
-                        console.error('Failed to append to the file:', err);
-                    }
-                })
 
                 await download_pdf(downloadUrl, pdfPath, { page });
 
@@ -314,11 +308,28 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (process.argv.includes('noticeofsale')) {
         missingFilings.push(FilingType.NOTICE_OF_SALE)
     }
-    await download_filing(process.argv[2], county, auction_date, missingFilings, endpoint).catch(err => {
+    const benignErrors = new Set([
+        "case discontinued",
+        "no valid document links available",
+    ]);
+    let exitCode = 0;
+    try {
+        const result = await download_filing(process.argv[2], county, auction_date, missingFilings, endpoint);
+        if (result?.error) {
+            const normalized = result.error.toLowerCase();
+            if (benignErrors.has(normalized)) {
+                console.log(args, `Benign error encountered: ${result.error}`);
+            } else {
+                console.error(args, "Finished with error:", result.error);
+                exitCode = 1;
+            }
+        }
+    } catch (err) {
         console.error(args, "Error processing", err);
-    })
+        exitCode = 1;
+    }
     console.log(args, "...Completed")
-    process.exit()
+    process.exit(exitCode)
 
 }
 
