@@ -328,7 +328,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         console.error(args, "Error processing", err);
         exitCode = 1;
     }
-    console.log(args, "...Completed")
+    // console.log(args, "...Completed")
     process.exit(exitCode)
 
 }

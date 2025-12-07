@@ -1,4 +1,4 @@
-using DataFrames, ProgressMeter, Dates, DotEnv, SQLite, DBInterface
+using DataFrames, Dates, DotEnv, SQLite, DBInterface
 
 DotEnv.load!()
 # SQLite DB location (shared with other tools)
@@ -18,32 +18,6 @@ function requested_resume_case()
         end
     end
     return DEFAULT_RESUME_CASE
-end
-
-# Parse many common date representations into Date; return missing if unknown.
-function todate(x)
-    x === missing && return missing
-    x isa Date && return x
-    x isa DateTime && return Date(x)
-    if x isa AbstractString
-        # Try common formats and fallbacks
-        for f in (nothing, dateformat"yyyy-mm-dd", dateformat"mm/dd/yyyy", dateformat"yyyy/mm/dd",
-                  dateformat"y-m-d", dateformat"y/m/d")
-            try
-                return isnothing(f) ? Date(x) : Date(x, f)
-            catch
-            end
-        end
-        # Fallback: try first 10 chars as ISO date (handles "yyyy-mm-dd HH:MM:SS" or "yyyy-mm-ddTHH:MM:SS")
-        if length(x) >= 10
-            s = String(x[1:10])
-            try
-                return Date(s, dateformat"yyyy-mm-dd")
-            catch
-            end
-        end
-    end
-    return missing
 end
 
 function discontinued_cases()
@@ -85,7 +59,15 @@ function main()
     # Combine the filtered rows with the randomly selected rows
     rows = vcat(urgent_rows, sampled_rows)
     println("Task list: $(nrow(urgent_rows)) urgent cases, $(nrow(sampled_rows)) sampled rows, $(nrow(rows)) total tasks")
-    process_data(rows)
+    
+    for (idx, row) in enumerate(eachrow(rows))
+        if idx % 10 == 0
+            println("Processing case $idx of $(nrow(rows))")
+        end    
+        ad_str = Dates.format(row.auction_date, dateformat"yyyy-mm-dd")
+        args = [row.case_number, row.borough, ad_str, row.missing_filings...]
+        run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), stdout, stderr), wait=true)
+    end
 end
 
 # Define the FilingType as a constant dictionary
@@ -100,13 +82,12 @@ const FilingType = Dict(
 function expected_filename(dir::AbstractString, case_number::AbstractString, auction_date)
     base = replace(case_number, "/" => "-")
     if dir == FilingType[:NOTICE_OF_SALE]
-        d = todate(auction_date)
-        if d === missing
+        if auction_date === missing
             # No date known; fall back to legacy naming
             return base * ".pdf"
         else
             # Store in date subfolder: YYYY-MM-DD/base.pdf
-            return string(Dates.format(d, dateformat"yyyy-mm-dd"), "/", base, ".pdf")
+            return string(Dates.format(auction_date, dateformat"yyyy-mm-dd"), "/", base, ".pdf")
         end
     else
         return base * ".pdf"
@@ -115,7 +96,6 @@ end
 
 # Function to find missing filings
 function missing_filings(case_number, auction_date)
-    auction_date = todate(auction_date)
     if auction_date !== missing && auction_date < today() - Day(30)
         return []
     end
@@ -176,7 +156,7 @@ function get_data()
     end
 
     # Parse auction_date text to Date where possible
-	transform!(rows, :auction_date => ByRow(todate) => :auction_date)
+	transform!(rows, :auction_date => ByRow(Date) => :auction_date)
 
     # Sort by borough priority, then by most recent auction date within each
     BOROUGH_PRIORITY = Dict(
@@ -212,124 +192,6 @@ function resume_from_case(rows::DataFrame, resume_case)
     return rows[idx:total, :]
 end
 
-const DEBUG = true
-const MAX_CONCURRENCY = 1
-function process_data(rows, max_concurrent_tasks=MAX_CONCURRENCY)
-    tasks = Task[]
-    # Use large-capacity channel to avoid blocking producers
-    channel = Channel{Tuple{String, Int}}(max(1, nrow(rows)))
-    failed_jobs = 0
-    running_tasks = 0
-    finished_tasks = 0
-    # Track created docs per type
-    nos_downloaded = 0
-    smf_downloaded = 0
-    # Cache expected filings metadata per case for quick lookups on completion
-    meta = Dict{String, Tuple{Any, Vector{String}}}()
-
-    !DEBUG && ( pb = Progress(nrow(rows)))
-
-    total = nrow(rows)
-    for (idx, row) in enumerate(eachrow(rows))
-        
-        !DEBUG && next!(pb; showvalues = [("Case #", row.case_number), ("date: ", row.auction_date), ("#", "$idx/$total"), ("NOS", string(nos_downloaded)), ("SMF", string(smf_downloaded))])
-        
-
-        # Respect concurrency limit by waiting for a completion when pool is full
-        while running_tasks >= max_concurrent_tasks
-            finished_case_number, exitcode = take!(channel)
-            if exitcode != 0
-                failed_jobs += 1
-                @warn "Processing case #$finished_case_number failed!"
-            end
-            if exitcode == 0
-                ad, filings = meta[String(finished_case_number)]
-                for dir in filings
-                    fname = expected_filename(dir, String(finished_case_number), ad)
-                    path = joinpath("web/saledocs", dir, fname)
-                    if isfile(path)
-                        if dir == FilingType[:NOTICE_OF_SALE]
-                            nos_downloaded += 1
-                        elseif dir == FilingType[:SURPLUS_MONEY_FORM]
-                            smf_downloaded += 1
-                        end
-                    end
-                end
-            end
-            running_tasks -= 1
-            finished_tasks += 1
-        end
-
-        task = @async begin
-            let row = row
-                ad = todate(row.auction_date)
-                ad_str = ad === missing ? "" : Dates.format(ad, dateformat"yyyy-mm-dd")
-                args = [row.case_number, row.borough, ad_str, row.missing_filings...]
-                p = run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), stdout, stderr), wait=true)
-                put!(channel, (row.case_number, p.exitcode))
-            end
-        end
-        push!(tasks, task)
-        running_tasks += 1
-        # Save metadata for completion-time accounting
-        meta[String(row.case_number)] = (row.auction_date, String.(row.missing_filings))
-
-        # Opportunistically drain any finished results to keep channel small
-        while isready(channel)
-            finished_case_number, exitcode = take!(channel)
-            if exitcode != 0
-                failed_jobs += 1
-                @warn "Processing case #$finished_case_number failed!"
-            end
-            if exitcode == 0
-                ad, filings = meta[String(finished_case_number)]
-                for dir in filings
-                    fname = expected_filename(dir, String(finished_case_number), ad)
-                    path = joinpath("web/saledocs", dir, fname)
-                    if isfile(path)
-                        if dir == FilingType[:NOTICE_OF_SALE]
-                            nos_downloaded += 1
-                        elseif dir == FilingType[:SURPLUS_MONEY_FORM]
-                            smf_downloaded += 1
-                        end
-                    end
-                end
-            end
-            running_tasks -= 1
-            finished_tasks += 1
-        end
-    end
-
-    # Wait on tasks
-    foreach(wait, tasks)
-
-    # Drain remaining completions
-    while finished_tasks < total
-        finished_case_number, exitcode = take!(channel)
-        if exitcode != 0
-            failed_jobs += 1
-            @warn "Processing case #$finished_case_number failed!"
-        end
-        if exitcode == 0
-            ad, filings = meta[String(finished_case_number)]
-            for dir in filings
-                fname = expected_filename(dir, String(finished_case_number), ad)
-                path = joinpath("web/saledocs", dir, fname)
-                if isfile(path)
-                    if dir == FilingType[:NOTICE_OF_SALE]
-                        nos_downloaded += 1
-                    elseif dir == FilingType[:SURPLUS_MONEY_FORM]
-                        smf_downloaded += 1
-                    end
-                end
-            end
-        end
-        finished_tasks += 1
-    end
-    println("\nNumber of failed jobs: $failed_jobs")
-
-    !DEBUG && finish!(pb)
-end
 
 # Main function
 main()
