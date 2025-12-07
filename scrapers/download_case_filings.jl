@@ -6,7 +6,21 @@ const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "forecl
 const CASE_LOG_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "cases.log"))
 db() = SQLite.DB(DB_PATH)
 
-# Parse many common date representations into Date; return missing if unknown
+# Optional case number to resume from when no CLI argument is provided.
+# Set to a string like "513094/2019" to always resume there by default.
+const DEFAULT_RESUME_CASE = nothing
+
+function requested_resume_case()
+    if length(ARGS) >= 1
+        arg = strip(String(ARGS[1]))
+        if !isempty(arg)
+            return arg
+        end
+    end
+    return DEFAULT_RESUME_CASE
+end
+
+# Parse many common date representations into Date; return missing if unknown.
 function todate(x)
     x === missing && return missing
     x isa Date && return x
@@ -53,7 +67,9 @@ end
 # Get filings. If WSS is set then we are running locally, otherwise on git.
 function main()
     
-    rows = get_data()    
+    resume_case = requested_resume_case()
+    rows = get_data()
+    rows = resume_from_case(rows, resume_case)
 
     # Filter rows where :missing_filings contains FilingType[:NOTICE_OF_SALE]
     urgent_mask = coalesce.(rows.auction_date .>= today(), false)
@@ -182,8 +198,23 @@ function get_data()
     return rows
 end
 
+function resume_from_case(rows::DataFrame, resume_case)
+    resume_case === nothing && return rows
+    resume_case_str = String(resume_case)
+    idx = findfirst(row -> String(row.case_number) == resume_case_str, eachrow(rows))
+    if isnothing(idx)
+        @warn "Resume case $(resume_case_str) not found in current task list; processing all cases"
+        return rows
+    end
+    skipped = idx - 1
+    total = nrow(rows)
+    println("Resuming from case $(resume_case_str) ($idx of $total); skipping $skipped queued cases")
+    return rows[idx:total, :]
+end
+
 const DEBUG = true
-function process_data(rows, max_concurrent_tasks=4)
+const MAX_CONCURRENCY = 1
+function process_data(rows, max_concurrent_tasks=MAX_CONCURRENCY)
     tasks = Task[]
     # Use large-capacity channel to avoid blocking producers
     channel = Channel{Tuple{String, Int}}(max(1, nrow(rows)))

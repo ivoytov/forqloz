@@ -1,5 +1,5 @@
 import { connect } from 'puppeteer-core';
-import Database from 'better-sqlite3';
+import Database from 'bun:sqlite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -56,10 +56,10 @@ for (const borough in boroughConfigDict) {
 // Update SQLite cases table instead of CSV
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DB_PATH = path.resolve(__dirname, '..', 'web', 'foreclosures', 'foreclosures.sqlite');
+const DB_PATH = 'web/foreclosures/foreclosures.sqlite'
 
 const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+db.run("PRAGMA journal_mode = WAL;");
 
 // Ensure unique constraint for UPSERT
 db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS uq_cases_case_boro ON cases(case_number, borough)').run();
