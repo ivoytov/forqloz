@@ -80,7 +80,15 @@ function main()
 
     # update pluto file
     pluto_data = DataFrame(DBInterface.execute(dbh, "SELECT * FROM pluto"))
+
+    # 1. Calculate missing BBLs
     new_lots = antijoin(dropmissing(auctions, :BBL), pluto_data, on=:BBL)
+    subset!(new_lots, :BBL => ByRow(!=("")))
+    
+    # 2. Deduplicate: Ensure we only have one row per BBL to prevent duplicate inserts
+    unique!(new_lots, :BBL)
+    new_lots = antijoin(dropmissing(auctions, :BBL), pluto_data, on=:BBL)
+    
     subset!(new_lots, :BBL => ByRow(!=("")))
 
     # Iterate over each BBL in `auctions` and call the `pluto` function, storing the results in the DataFrame
