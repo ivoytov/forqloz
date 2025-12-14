@@ -158,23 +158,12 @@ function get_data()
     # Parse auction_date text to Date where possible
 	transform!(rows, :auction_date => ByRow(Date) => :auction_date)
 
-    # Sort by borough priority, then by most recent auction date within each
-    BOROUGH_PRIORITY = Dict(
-        "Manhattan" => 1,
-        "Brooklyn" => 2,
-        "Queens" => 3,
-        "Bronx" => 4,
-        "Staten Island" => 5,
-    )
-    transform!(rows, :borough => ByRow(b -> get(BOROUGH_PRIORITY, String(b), 99)) => :borough_priority)
-    sort!(rows, [order(:borough_priority), order(:auction_date, rev=true)])
-    select!(rows, Not(:borough_priority))
-
     # Identify missing filings
     transform!(rows, [:case_number, :auction_date] => ByRow(missing_filings) => :missing_filings)
     filter!(row -> !isempty(row.missing_filings), rows)
 
     println(nrow(rows), " cases have missing filings")
+    sort!(rows, [:auction_date, :case_number], rev=true)
     return rows
 end
 
