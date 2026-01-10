@@ -169,7 +169,7 @@ const columnDefs = [
         sortIndex: 0,
         filterParams: {
             minValidYear: 2024,
-            maxValidYear: 2025,
+            maxValidYear: 2099,
             buttons: ["apply", "reset"],
             inRangeInclusive: true,
             closeOnApply: true,
