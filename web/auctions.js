@@ -545,6 +545,7 @@ function startResize() {
 }
 
 function toCapitalizedCase(str) {
+    if (!str) return str;
     return str
       .toLowerCase() // Convert the entire string to lowercase first
       .split(' ') // Split the string into words based on spaces
