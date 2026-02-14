@@ -10,8 +10,9 @@ function db()
 end
 
 # Function to prompt with a default answer
-function prompt(question, default_answer)
-    print("$question [$default_answer]: ")
+function prompt(question, default_answer; prefix=nothing)
+    label = isnothing(prefix) ? "" : string(prefix, " ")
+    print("$label$question [$default_answer]: ")
     input = readline()
     input == "q" && return nothing
     if input == ""
@@ -103,7 +104,7 @@ function extract_text_from_pdf(pdf_path)
     return text
 end
 
-function extract_llm_values(pdf_path)
+function extract_llm_values(pdf_path; prompt_prefix=nothing)
     case_number = basename(pdf_path)[1:end-4]
     image_path = case_number * ".png"
 
@@ -139,9 +140,9 @@ function extract_llm_values(pdf_path)
     parsed_response = r.response[:choices][1][:message][:content] |> JSON3.read
 
     # Access structured data
-    judgement = prompt("Enter judgement:", parsed_response["judgement"])
-    upset_price = prompt("Enter upset price:", parsed_response["upset_price"])
-    winning_bid = prompt("Enter winning bid:", parsed_response["winning_bid"])
+    judgement = prompt("Enter judgement:", parsed_response["judgement"]; prefix=prompt_prefix)
+    upset_price = prompt("Enter upset price:", parsed_response["upset_price"]; prefix=prompt_prefix)
+    winning_bid = prompt("Enter winning bid:", parsed_response["winning_bid"]; prefix=prompt_prefix)
 
     if isnothing(judgement) || judgement == "" || isnothing(winning_bid) || winning_bid == "" || isnothing(upset_price) || upset_price == ""
         println("Error: Missing values in the response.")
@@ -164,7 +165,8 @@ function prompt_for_winning_bid(foreclosure_case)
     pdf_path = joinpath("web/saledocs/surplusmoney", filename)
     run(`open "$pdf_path"`)
         
-    prices = extract_llm_values(pdf_path)
+    case_label = "[Case $(replace(case_number, "/" => "-"))]"
+    prices = extract_llm_values(pdf_path; prompt_prefix=case_label)
 
     if isnothing(prices)
         println("Error extracting values from $pdf_path")
@@ -216,7 +218,9 @@ function get_auction_results()
     sort!(cases, order(:auction_date, rev=true))
 
 
-    prompt_for_winning_bid.(eachrow(cases))
+    for foreclosure_case in eachrow(cases)
+        prompt_for_winning_bid(foreclosure_case)
+    end
 
 
     println("Database table 'bids' has been updated with missing bid results values.")
@@ -283,7 +287,7 @@ function notice_of_sale_path(case_number::AbstractString, auction_date)
 end
 
 # Extract block/lot/address from file
-function parse_notice_of_sale(pdf_path)
+function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
     # Extract text from PDF
     text = try
         extract_text_from_pdf(pdf_path)
@@ -311,8 +315,8 @@ function parse_notice_of_sale(pdf_path)
         # Open the PDF file with the default application on macOS
         run(`open "$pdf_path"`)
 
-        block = prompt("Enter block:", block)
-        lot = prompt("Enter lot:", lot)
+        block = prompt("Enter block:", block; prefix=prompt_prefix)
+        lot = prompt("Enter lot:", lot; prefix=prompt_prefix)
 
         run(`osascript -e 'tell application "Preview" to close window 1'`)
     end
@@ -366,7 +370,8 @@ function get_block_and_lot()
 
     for case in eachrow(new_cases)
         pdf_path = notice_of_sale_path(case.case_number, case.auction_date)
-        values = parse_notice_of_sale(pdf_path)
+        case_label = "[Case $(replace(case.case_number, "/" => "-"))]"
+        values = parse_notice_of_sale(pdf_path; prompt_prefix=case_label)
         if isnothing(values)
             continue
         end
