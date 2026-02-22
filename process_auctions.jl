@@ -163,7 +163,7 @@ end
 
 function condo_base_bbl_key(borough, block, lot)
     lot < 1000 && throw(ArgumentError("Lot must be over 1000"))
-    outfields = "CONDO_BASE_BBL_KEY, UNIT_DESIGNATION"
+    outfields = "CONDO_BASE_BBL, UNIT_DESIGNATION"
     url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/4"
     # query = "UNIT_BORO = 1 and UNIT_BLOCK = 459 and UNIT_LOT = 1113"
     query = "UNIT_BORO = '$(borough_id_dict[borough])' and UNIT_BLOCK=$(block) and UNIT_LOT=$(lot)"
@@ -171,7 +171,7 @@ function condo_base_bbl_key(borough, block, lot)
     isempty(result) && return missing, missing
 
     (
-        result[1]["attributes"]["CONDO_BASE_BBL_KEY"],
+        result[1]["attributes"]["CONDO_BASE_BBL"],
         something(result[1]["attributes"]["UNIT_DESIGNATION"], missing)
     )
 end
@@ -195,7 +195,7 @@ end
 function condo_billing_bbl(condo_base_bbl_key)
     outfields = "CONDO_BILLING_BBL"
     url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/3"
-    query = "CONDO_BASE_BBL_KEY = $condo_base_bbl_key"
+    query = "CONDO_BASE_BBL = $condo_base_bbl_key"
     result = esri_query(url, outfields, query)
     isempty(result) && return missing
     return parse(Int,result[1]["attributes"]["CONDO_BILLING_BBL"])
