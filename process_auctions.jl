@@ -1,4 +1,4 @@
-using DataFrames, Dates, CSV, GLM, Statistics, JSON3, HTTP, Printf, SQLite, DBInterface
+using DataFrames, Dates, CSV, GLM, Statistics, JSON3, HTTP, Printf, SQLite, DBInterface, ProgressMeter
 
 const DB_PATH = normpath(joinpath(@__DIR__, "web", "foreclosures", "foreclosures.sqlite"))
 
@@ -8,6 +8,8 @@ read_csv(file) = CSV.read(file, DataFrame)
 
 borough_dict = Dict(1 => "Manhattan", 2 => "Bronx", 3 => "Brooklyn", 4 => "Queens", 5 => "Staten Island")
 borough_id_dict = Dict("Manhattan" => "1", "Bronx"=>"2", "Brooklyn"=>"3", "Queens" =>"4", "Staten Island"=>"5")
+
+const PROGRESS_BAR_WIDTH = 40
 
 # Initialize and preprocess datasets
 function initialize_data()
@@ -68,11 +70,18 @@ function main()
     # Fill in missing BBL / unit information
     need_update = filter(row -> ismissing(row.BBL) || ((row.lot > 1000) && ismissing(row.unit)), auctions)
     if nrow(need_update) > 0
-        for r in eachrow(need_update)
-            new_bbl, new_unit = bbl(r.borough, r.block, r.lot)
-            DBInterface.execute(dbh,
-                "UPDATE lots SET BBL = ?, unit = ? WHERE case_number = ? AND borough = ?",
-                (new_bbl, new_unit, r.case_number, r.borough))
+        DBInterface.execute(dbh, "BEGIN")
+        try
+            @showprogress dt=1 desc="Updating lots" barlen=PROGRESS_BAR_WIDTH for r in eachrow(need_update)
+                new_bbl, new_unit = bbl(r.borough, r.block, r.lot)
+                DBInterface.execute(dbh,
+                    "UPDATE lots SET BBL = ?, unit = ? WHERE case_number = ? AND borough = ?",
+                    (new_bbl, new_unit, r.case_number, r.borough))
+            end
+            DBInterface.execute(dbh, "COMMIT")
+        catch
+            DBInterface.execute(dbh, "ROLLBACK")
+            rethrow()
         end
         # Reload auctions after updates
         auctions = DataFrame(DBInterface.execute(dbh, "SELECT * FROM lots"))
@@ -87,29 +96,33 @@ function main()
     
     # 2. Deduplicate: Ensure we only have one row per BBL to prevent duplicate inserts
     unique!(new_lots, :BBL)
-    new_lots = antijoin(dropmissing(auctions, :BBL), pluto_data, on=:BBL)
-    
-    subset!(new_lots, :BBL => ByRow(!=("")))
 
     # Iterate over each BBL in `auctions` and call the `pluto` function, storing the results in the DataFrame
     columns = ["Address", "Borough", "Block", "Lot", "ZipCode", "BldgClass", "LandUse", "BBL", "YearBuilt", "YearAlter1", "YearAlter2", "OwnerName", "LotArea", "BldgArea"]
 
-    for bbl in new_lots.BBL
-        attributes = pluto(bbl)
-        if attributes !== missing
-            row = []
-            for col in columns
-                if col == "LandUse" && !isnothing(attributes[col])
-                    push!(row, parse(Int, attributes[col]))
-                    continue
+    DBInterface.execute(dbh, "BEGIN")
+    try
+        @showprogress dt=1 desc="Fetching pluto" barlen=PROGRESS_BAR_WIDTH for bbl in new_lots.BBL
+            attributes = pluto(bbl)
+            if attributes !== missing
+                row = []
+                for col in columns
+                    if col == "LandUse" && !isnothing(attributes[col])
+                        push!(row, parse(Int, attributes[col]))
+                        continue
+                    end
+                    push!(row, (attributes[col]))
                 end
-                push!(row, (attributes[col]))
+                
+                # Insert into pluto table
+                sql = "INSERT INTO pluto (Address, Borough, Block, Lot, ZipCode, BldgClass, LandUse, BBL, YearBuilt, YearAlter1, YearAlter2, OwnerName, LotArea, BldgArea) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                DBInterface.execute(dbh, sql, Tuple(row))
             end
-            
-            # Insert into pluto table
-            sql = "INSERT INTO pluto (Address, Borough, Block, Lot, ZipCode, BldgClass, LandUse, BBL, YearBuilt, YearAlter1, YearAlter2, OwnerName, LotArea, BldgArea) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            DBInterface.execute(dbh, sql, Tuple(row))
         end
+        DBInterface.execute(dbh, "COMMIT")
+    catch
+        DBInterface.execute(dbh, "ROLLBACK")
+        rethrow()
     end
 
 
@@ -163,7 +176,7 @@ end
 
 function condo_base_bbl_key(borough, block, lot)
     lot < 1000 && throw(ArgumentError("Lot must be over 1000"))
-    outfields = "CONDO_BASE_BBL, UNIT_DESIGNATION"
+    outfields = "CONDO_BASE_BBL_KEY, UNIT_DESIGNATION"
     url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/4"
     # query = "UNIT_BORO = 1 and UNIT_BLOCK = 459 and UNIT_LOT = 1113"
     query = "UNIT_BORO = '$(borough_id_dict[borough])' and UNIT_BLOCK=$(block) and UNIT_LOT=$(lot)"
@@ -171,7 +184,7 @@ function condo_base_bbl_key(borough, block, lot)
     isempty(result) && return missing, missing
 
     (
-        result[1]["attributes"]["CONDO_BASE_BBL"],
+        result[1]["attributes"]["CONDO_BASE_BBL_KEY"],
         something(result[1]["attributes"]["UNIT_DESIGNATION"], missing)
     )
 end
@@ -195,7 +208,7 @@ end
 function condo_billing_bbl(condo_base_bbl_key)
     outfields = "CONDO_BILLING_BBL"
     url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/3"
-    query = "CONDO_BASE_BBL = $condo_base_bbl_key"
+    query = "CONDO_BASE_BBL_KEY = $condo_base_bbl_key"
     result = esri_query(url, outfields, query)
     isempty(result) && return missing
     return parse(Int,result[1]["attributes"]["CONDO_BILLING_BBL"])
