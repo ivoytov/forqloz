@@ -1,5 +1,6 @@
 const minTransactionPrice = 10000
 let markers = {};
+let mapRenderSeq = 0;
 
 
 // Use SQLite DB (sql.js) only — no CSV fallback
@@ -398,9 +399,11 @@ async function fetchPlutoFeaturesByBBL(bbls) {
 
 
 async function onGridFilterChanged() {
+    const seq = ++mapRenderSeq;
     markerLayer.clearLayers()
     outlineLayer.clearLayers()
     updateURLWithFilters();
+    markers = {};
 
     const rows = [];
     const bbls = new Set();
@@ -419,8 +422,14 @@ async function onGridFilterChanged() {
     setLoading(true, "Loading map data…");
     try {
         const featuresByBbl = await fetchPlutoFeaturesByBBL([...bbls]);
+        if (seq !== mapRenderSeq) {
+            return;
+        }
 
         for (const data of rows) {
+            if (seq !== mapRenderSeq) {
+                return;
+            }
             const onClickTableZoom = () => {
                 // Highlight the row in AG Grid
                 gridApi.forEachNodeAfterFilterAndSort(function (node) {
