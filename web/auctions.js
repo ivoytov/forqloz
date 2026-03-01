@@ -1,6 +1,7 @@
 const minTransactionPrice = 10000
 let markers = {};
 let mapRenderSeq = 0;
+const mapFeatureCache = new Map();
 
 
 // Use SQLite DB (sql.js) only — no CSV fallback
@@ -357,6 +358,21 @@ function setLoading(isLoading, message = "Loading map data…") {
     overlay.classList.toggle("hidden", !isLoading);
 }
 
+function setMapStatus({ total = 0, fetched = 0, missing = 0 } = {}) {
+    const status = `Map: ${fetched}/${total} loaded` + (missing > 0 ? `, ${missing} missing` : "");
+    map.attributionControl.setPrefix(status);
+}
+
+function debounce(fn, delayMs) {
+    let t = null;
+    return (...args) => {
+        if (t) {
+            clearTimeout(t);
+        }
+        t = setTimeout(() => fn(...args), delayMs);
+    };
+}
+
 function chunkArray(arr, size) {
     const out = [];
     for (let i = 0; i < arr.length; i += size) {
@@ -371,7 +387,8 @@ async function fetchPlutoFeaturesByBBL(bbls) {
     }
 
     const featuresByBbl = new Map();
-    const chunks = chunkArray(bbls, MAPPLUTO_BATCH_SIZE);
+    const missing = bbls.filter((bbl) => !mapFeatureCache.has(String(bbl)));
+    const chunks = chunkArray(missing, MAPPLUTO_BATCH_SIZE);
     const queries = chunks.map((chunk) => new Promise((resolve) => {
         blockLotLayer.query()
             .where(`BBL IN (${chunk.join(",")})`)
@@ -386,7 +403,7 @@ async function fetchPlutoFeaturesByBBL(bbls) {
                 for (const feature of featureCollection.features) {
                     const bbl = feature?.properties?.BBL;
                     if (bbl !== undefined && bbl !== null) {
-                        featuresByBbl.set(String(bbl), feature);
+                        mapFeatureCache.set(String(bbl), feature);
                     }
                 }
                 resolve();
@@ -394,6 +411,12 @@ async function fetchPlutoFeaturesByBBL(bbls) {
     }));
 
     await Promise.all(queries);
+    for (const bbl of bbls) {
+        const feature = mapFeatureCache.get(String(bbl));
+        if (feature) {
+            featuresByBbl.set(String(bbl), feature);
+        }
+    }
     return featuresByBbl;
 }
 
@@ -419,12 +442,18 @@ async function onGridFilterChanged() {
         }
     });
 
+    const total = bbls.size;
+    setMapStatus({ total, fetched: 0, missing: total });
     setLoading(true, "Loading map data…");
     try {
         const featuresByBbl = await fetchPlutoFeaturesByBBL([...bbls]);
         if (seq !== mapRenderSeq) {
             return;
         }
+
+        const fetched = featuresByBbl.size;
+        const missingCount = Math.max(0, total - fetched);
+        setMapStatus({ total, fetched, missing: missingCount });
 
         for (const data of rows) {
             if (seq !== mapRenderSeq) {
@@ -493,6 +522,8 @@ async function onGridFilterChanged() {
     }
 }
 
+const debouncedOnGridFilterChanged = debounce(onGridFilterChanged, 150);
+
 // Initialize AG Grid
 const gridOptions = {
     columnDefs: columnDefs,
@@ -507,7 +538,7 @@ const gridOptions = {
     },
     onRowSelected: zoomToBlock,
     // Listen for AG Grid filter changes
-    onFilterChanged: onGridFilterChanged,
+    onFilterChanged: debouncedOnGridFilterChanged,
     onSortChanged: updateURLWithFilters,
 
     columnTypes: {
