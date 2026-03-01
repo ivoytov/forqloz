@@ -70,14 +70,42 @@ async function loadDB() {
 }
 
 
+function toBase64Url(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function fromBase64Url(encoded) {
+    const padded = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+}
+
+function encodeState(state) {
+    return toBase64Url(JSON.stringify(state));
+}
+
+function decodeState(encoded) {
+    return JSON.parse(fromBase64Url(encoded));
+}
+
 function updateURLWithFilters() {
-    const filters = gridApi.getFilterModel()
+    const state = {
+        v: 2,
+        filters: gridApi.getFilterModel(),
+        sort: getSortState(),
+    };
 
     const params = new URLSearchParams();
-
-    Object.keys(filters).forEach(column => {
-        params.set(column, JSON.stringify(filters[column]));
-    });
+    params.set('state', encodeState(state));
 
     // Update the URL in the address bar
     window.history.replaceState({}, '', `${window.location.pathname}?${params}`);
@@ -114,13 +142,66 @@ function applyFiltersFromURL(params = null) {
         gridApi.onFilterChanged()
         return
     }
-    const filters = {};
+    if (params.has('state')) {
+        try {
+            const state = decodeState(params.get('state'));
+            if (state?.filters) {
+                gridApi.setFilterModel(state.filters);
+            }
+            if (state?.sort) {
+                applySortState(state.sort);
+            }
+            return;
+        } catch (e) {
+            console.warn("Failed to parse URL state, falling back to legacy filters", e);
+        }
+    }
 
+    const filters = {};
     params.forEach((value, key) => {
         filters[key] = JSON.parse(value);
     });
 
     gridApi.setFilterModel(filters);
+}
+
+function getSortState() {
+    if (typeof gridApi.getSortModel === "function") {
+        return gridApi.getSortModel();
+    }
+    if (typeof gridApi.getColumnState === "function") {
+        return gridApi.getColumnState()
+            .filter((col) => col.sort)
+            .map((col) => ({ colId: col.colId, sort: col.sort, sortIndex: col.sortIndex }));
+    }
+    if (gridApi.columnApi && typeof gridApi.columnApi.getColumnState === "function") {
+        return gridApi.columnApi.getColumnState()
+            .filter((col) => col.sort)
+            .map((col) => ({ colId: col.colId, sort: col.sort, sortIndex: col.sortIndex }));
+    }
+    return [];
+}
+
+function applySortState(sortModel) {
+    if (!sortModel || sortModel.length === 0) {
+        return;
+    }
+    if (typeof gridApi.setSortModel === "function") {
+        gridApi.setSortModel(sortModel);
+        return;
+    }
+    const state = sortModel.map((s) => ({
+        colId: s.colId,
+        sort: s.sort,
+        sortIndex: s.sortIndex,
+    }));
+    if (typeof gridApi.applyColumnState === "function") {
+        gridApi.applyColumnState({ state, applyOrder: false });
+        return;
+    }
+    if (gridApi.columnApi && typeof gridApi.columnApi.applyColumnState === "function") {
+        gridApi.columnApi.applyColumnState({ state, applyOrder: false });
+    }
 }
 
 const propertyInfoMapUrl = (BBL, lot) => "https://propertyinformationportal.nyc.gov/parcels/" + (lot > 1000 ? "unit/" : "parcel/") + BBL
@@ -247,84 +328,160 @@ function boroughIdFromName(borough) {
     return Object.entries(borough_dict).find(([id, boro]) => boro === borough)[0]
 }
 
+const MAPPLUTO_BATCH_SIZE = 200;
+const MAPPLUTO_FIELDS = [
+    "BBL",
+    "Address",
+    "UnitsRes",
+    "UnitsTotal",
+    "ResArea",
+    "OwnerName",
+    "NumBldgs",
+    "NumFloors",
+    "LotArea",
+    "BldgClass",
+    "AssessLand",
+    "AssessTot",
+];
 
-function onGridFilterChanged() {
+function setLoading(isLoading, message = "Loading map data…") {
+    const overlay = document.getElementById("loading-overlay");
+    if (!overlay) {
+        return;
+    }
+    const text = overlay.querySelector(".loading-text");
+    if (text) {
+        text.textContent = message;
+    }
+    overlay.classList.toggle("hidden", !isLoading);
+}
+
+function chunkArray(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) {
+        out.push(arr.slice(i, i + size));
+    }
+    return out;
+}
+
+async function fetchPlutoFeaturesByBBL(bbls) {
+    if (!bbls.length) {
+        return new Map();
+    }
+
+    const featuresByBbl = new Map();
+    const chunks = chunkArray(bbls, MAPPLUTO_BATCH_SIZE);
+    const queries = chunks.map((chunk) => new Promise((resolve) => {
+        blockLotLayer.query()
+            .where(`BBL IN (${chunk.join(",")})`)
+            .fields(MAPPLUTO_FIELDS)
+            .run((error, featureCollection) => {
+                if (error) {
+                    console.error("MAPPLUTO batch query failed", error);
+                    resolve();
+                    return;
+                }
+
+                for (const feature of featureCollection.features) {
+                    const bbl = feature?.properties?.BBL;
+                    if (bbl !== undefined && bbl !== null) {
+                        featuresByBbl.set(String(bbl), feature);
+                    }
+                }
+                resolve();
+            });
+    }));
+
+    await Promise.all(queries);
+    return featuresByBbl;
+}
+
+
+async function onGridFilterChanged() {
     markerLayer.clearLayers()
     outlineLayer.clearLayers()
     updateURLWithFilters();
+
+    const rows = [];
+    const bbls = new Set();
 
     // Get all displayed rows
     gridApi.forEachNodeAfterFilterAndSort(({ data }) => {
         if (!data.block || !data.borough || !data.lot) {
             return
         }
-        
-        const onClickTableZoom = () => {
-            // Highlight the row in AG Grid
-            gridApi.forEachNodeAfterFilterAndSort(function (node) {
-                if (node.data.borough === data.borough && node.data.block === data.block && node.data.lot === data.lot) {
-                    node.setSelected(true, true); // Select the row
-
-                    // Ensure the selected row is visible by scrolling to it
-                    gridApi.ensureIndexVisible(node.rowIndex, 'middle');
-                }
-            });
+        rows.push(data);
+        if (data.BBL !== null && data.BBL !== undefined) {
+            bbls.add(String(data.BBL));
         }
-
-        if (data.BBL === null) {
-            return
-        }
-        blockLotLayer.query()
-            .where(`BBL=${data.BBL}`)
-            .run((error, featureCollection) => {
-                if (error) {
-                    console.error("Couldn't find geometry for BBL", data.borough_code, data.BBL, error);
-                    return;
-                }
-
-                if (featureCollection.features.length == 0) {
-                    console.warn("failed to return any results", data.borough_code, data.BBL)
-                    return;
-                }
-
-                const layer = L.geoJSON(featureCollection, {
-                    onEachFeature: function (feature, layer) {
-                        layer.on('click', onClickTableZoom)
-                    }
-                }).addTo(outlineLayer);
-
-                const centroid = getCentroid(featureCollection.features[0].geometry)
-                const p = featureCollection.features[0].properties
-                const popupContent = `
-                <div>
-                <h3>${p.Address}</h3>
-                <ul>
-                    <li>UnitsRes: ${p.UnitsRes}</li>
-                    <li>UnitsTotal: ${p.UnitsTotal}</li>
-                    <li>ResArea: ${p.ResArea}</li>
-                    <li>OwnerName: ${p.OwnerName}</li>
-                    <li>NumBldgs: ${p.NumBldgs}</li>
-                    <li>NumFloors: ${p.NumFloors}</li>
-                    <li>LotArea: ${p.LotArea}</li>
-                    <li>BldgClass: ${p.BldgClass}</li>
-                    <li>AssessLand: ${p.AssessLand}</li>
-                    <li>AssessTot: ${p.AssessTot}</li>
-                    <li>LotArea: ${p.LotArea}</li>
-                    </ul>
-                </div>
-                `
-
-                const marker = L.marker([centroid.lng, centroid.lat]).bindPopup(popupContent).addTo(markerLayer);
-                marker.on('click', onClickTableZoom)
-
-                // Store the marker in the markers object
-                if (!markers[data.BBL]) {
-                    markers[data.BBL] = []
-                }
-                markers[data.BBL].push(layer);
-
-            });
     });
+
+    setLoading(true, "Loading map data…");
+    try {
+        const featuresByBbl = await fetchPlutoFeaturesByBBL([...bbls]);
+
+        for (const data of rows) {
+            const onClickTableZoom = () => {
+                // Highlight the row in AG Grid
+                gridApi.forEachNodeAfterFilterAndSort(function (node) {
+                    if (node.data.borough === data.borough && node.data.block === data.block && node.data.lot === data.lot) {
+                        node.setSelected(true, true); // Select the row
+
+                        // Ensure the selected row is visible by scrolling to it
+                        gridApi.ensureIndexVisible(node.rowIndex, 'middle');
+                    }
+                });
+            }
+
+            if (data.BBL === null || data.BBL === undefined) {
+                continue
+            }
+
+            const feature = featuresByBbl.get(String(data.BBL));
+            if (!feature) {
+                console.warn("failed to return any results", data.borough_code, data.BBL)
+                continue;
+            }
+
+            const layer = L.geoJSON(feature, {
+                onEachFeature: function (feature, layer) {
+                    layer.on('click', onClickTableZoom)
+                }
+            }).addTo(outlineLayer);
+
+            const centroid = getCentroid(feature.geometry)
+            const p = feature.properties
+            const popupContent = `
+            <div>
+            <h3>${p.Address}</h3>
+            <ul>
+                <li>UnitsRes: ${p.UnitsRes}</li>
+                <li>UnitsTotal: ${p.UnitsTotal}</li>
+                <li>ResArea: ${p.ResArea}</li>
+                <li>OwnerName: ${p.OwnerName}</li>
+                <li>NumBldgs: ${p.NumBldgs}</li>
+                <li>NumFloors: ${p.NumFloors}</li>
+                <li>LotArea: ${p.LotArea}</li>
+                <li>BldgClass: ${p.BldgClass}</li>
+                <li>AssessLand: ${p.AssessLand}</li>
+                <li>AssessTot: ${p.AssessTot}</li>
+                <li>LotArea: ${p.LotArea}</li>
+                </ul>
+            </div>
+            `
+
+            const marker = L.marker([centroid.lng, centroid.lat]).bindPopup(popupContent).addTo(markerLayer);
+            marker.on('click', onClickTableZoom)
+
+            // Store the marker in the markers object
+            if (!markers[data.BBL]) {
+                markers[data.BBL] = []
+            }
+            markers[data.BBL].push(layer);
+        }
+    } finally {
+        setLoading(false);
+    }
 }
 
 // Initialize AG Grid
@@ -342,6 +499,7 @@ const gridOptions = {
     onRowSelected: zoomToBlock,
     // Listen for AG Grid filter changes
     onFilterChanged: onGridFilterChanged,
+    onSortChanged: updateURLWithFilters,
 
     columnTypes: {
         currency: {

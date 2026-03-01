@@ -10,6 +10,24 @@ borough_dict = Dict(1 => "Manhattan", 2 => "Bronx", 3 => "Brooklyn", 4 => "Queen
 borough_id_dict = Dict("Manhattan" => "1", "Bronx"=>"2", "Brooklyn"=>"3", "Queens" =>"4", "Staten Island"=>"5")
 
 const PROGRESS_BAR_WIDTH = 40
+const ESRI_BATCH_SIZE = 200
+
+standard_bbl(borough, block, lot) = parse(Int, @sprintf("%s%05d%04d", borough_id_dict[borough], block, lot))
+
+to_int(x::Integer) = Int(x)
+to_int(x::AbstractString) = parse(Int, x)
+to_int(x) = Int(x)
+
+function chunk_indices(n, size)
+    out = Vector{UnitRange{Int}}()
+    i = 1
+    while i <= n
+        j = min(i + size - 1, n)
+        push!(out, i:j)
+        i = j + 1
+    end
+    return out
+end
 
 # Initialize and preprocess datasets
 function initialize_data()
@@ -70,10 +88,27 @@ function main()
     # Fill in missing BBL / unit information
     need_update = filter(row -> ismissing(row.BBL) || ((row.lot > 1000) && ismissing(row.unit)), auctions)
     if nrow(need_update) > 0
+        condo_requests = [(r.borough, r.block, r.lot) for r in eachrow(need_update) if r.lot > 1000]
+        unique!(condo_requests)
+        condo_map = condo_base_bbl_keys(condo_requests)
+        base_keys = unique([v[1] for v in values(condo_map)])
+        billing_map = condo_billing_bbls(base_keys)
         DBInterface.execute(dbh, "BEGIN")
         try
             @showprogress dt=1 desc="Updating lots" barlen=PROGRESS_BAR_WIDTH for r in eachrow(need_update)
-                new_bbl, new_unit = bbl(r.borough, r.block, r.lot)
+                new_bbl = standard_bbl(r.borough, r.block, r.lot)
+                new_unit = missing
+                if r.lot > 1000
+                    key = (borough_id_dict[r.borough], r.block, r.lot)
+                    if haskey(condo_map, key)
+                        base_key, unit = condo_map[key]
+                        billing = get(billing_map, base_key, missing)
+                        if !ismissing(billing)
+                            new_bbl = billing
+                            new_unit = unit
+                        end
+                    end
+                end
                 DBInterface.execute(dbh,
                     "UPDATE lots SET BBL = ?, unit = ? WHERE case_number = ? AND borough = ?",
                     (new_bbl, new_unit, r.case_number, r.borough))
@@ -102,8 +137,10 @@ function main()
 
     DBInterface.execute(dbh, "BEGIN")
     try
+        bbls = [to_int(b) for b in new_lots.BBL if !ismissing(b)]
+        attrs_map = pluto_bbls(bbls)
         @showprogress dt=1 desc="Fetching pluto" barlen=PROGRESS_BAR_WIDTH for bbl in new_lots.BBL
-            attributes = pluto(bbl)
+            attributes = get(attrs_map, bbl, missing)
             if attributes !== missing
                 row = []
                 for col in columns
@@ -176,7 +213,7 @@ end
 
 function condo_base_bbl_key(borough, block, lot)
     lot < 1000 && throw(ArgumentError("Lot must be over 1000"))
-    outfields = "CONDO_BASE_BBL_KEY, UNIT_DESIGNATION"
+    outfields = "UNIT_BORO, UNIT_BLOCK, UNIT_LOT, CONDO_BASE_BBL_KEY, UNIT_DESIGNATION"
     url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/4"
     # query = "UNIT_BORO = 1 and UNIT_BLOCK = 459 and UNIT_LOT = 1113"
     query = "UNIT_BORO = '$(borough_id_dict[borough])' and UNIT_BLOCK=$(block) and UNIT_LOT=$(lot)"
@@ -187,6 +224,32 @@ function condo_base_bbl_key(borough, block, lot)
         result[1]["attributes"]["CONDO_BASE_BBL_KEY"],
         something(result[1]["attributes"]["UNIT_DESIGNATION"], missing)
     )
+end
+
+function condo_base_bbl_keys(condo_requests::AbstractVector)
+    isempty(condo_requests) && return Dict{Tuple{String, Int, Int}, Tuple{Int, Union{Missing, String}}}()
+    outfields = "UNIT_BORO, UNIT_BLOCK, UNIT_LOT, CONDO_BASE_BBL_KEY, UNIT_DESIGNATION"
+    url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/4"
+    out = Dict{Tuple{String, Int, Int}, Tuple{Int, Union{Missing, String}}}()
+    ranges = chunk_indices(length(condo_requests), ESRI_BATCH_SIZE)
+    for r in ranges
+        chunk = condo_requests[r]
+        clauses = String[]
+        for (borough, block, lot) in chunk
+            boro_id = haskey(borough_id_dict, borough) ? borough_id_dict[borough] : string(borough)
+            push!(clauses, "UNIT_BORO = '$boro_id' and UNIT_BLOCK = $block and UNIT_LOT = $lot")
+        end
+        query = "(" * join(clauses, ") OR (") * ")"
+        result = esri_query(url, outfields, query)
+        for feat in result
+            attrs = feat["attributes"]
+            key = (string(attrs["UNIT_BORO"]), to_int(attrs["UNIT_BLOCK"]), to_int(attrs["UNIT_LOT"]))
+            base_key = to_int(attrs["CONDO_BASE_BBL_KEY"])
+            unit = something(attrs["UNIT_DESIGNATION"], missing)
+            out[key] = (base_key, unit)
+        end
+    end
+    return out
 end
 
 function esri_query(url, outfields, query; format="JSON")
@@ -206,12 +269,29 @@ function esri_query(url, outfields, query; format="JSON")
 end
 
 function condo_billing_bbl(condo_base_bbl_key)
-    outfields = "CONDO_BILLING_BBL"
+    outfields = "CONDO_BASE_BBL_KEY, CONDO_BILLING_BBL"
     url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/3"
     query = "CONDO_BASE_BBL_KEY = $condo_base_bbl_key"
     result = esri_query(url, outfields, query)
     isempty(result) && return missing
-    return parse(Int,result[1]["attributes"]["CONDO_BILLING_BBL"])
+    return to_int(result[1]["attributes"]["CONDO_BILLING_BBL"])
+end
+
+function condo_billing_bbls(condo_base_bbl_keys::AbstractVector{<:Integer})
+    isempty(condo_base_bbl_keys) && return Dict{Int, Int}()
+    outfields = "CONDO_BASE_BBL_KEY, CONDO_BILLING_BBL"
+    url = "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/DTM_ETL_DAILY_view/FeatureServer/3"
+    key_list = join(condo_base_bbl_keys, ", ")
+    query = "CONDO_BASE_BBL_KEY IN ($key_list)"
+    result = esri_query(url, outfields, query)
+    out = Dict{Int, Int}()
+    for feat in result
+        attrs = feat["attributes"]
+        key = to_int(attrs["CONDO_BASE_BBL_KEY"])
+        billing = to_int(attrs["CONDO_BILLING_BBL"])
+        out[key] = billing
+    end
+    return out
 end
 
 function pluto(bbl)
@@ -223,13 +303,33 @@ function pluto(bbl)
     result[1]["attributes"]
 end
 
+function pluto_bbls(bbls::AbstractVector)
+    isempty(bbls) && return Dict{Int, Any}()
+    outfields = ["Address", "Borough", "Block", "Lot", "ZipCode", "BldgClass", "LandUse", "BBL", "YearBuilt", "YearAlter1", "YearAlter2", "OwnerName", "LotArea", "BldgArea"]
+    url = "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/ArcGIS/rest/services/MAPPLUTO/FeatureServer/0"
+    out = Dict{Int, Any}()
+    ranges = chunk_indices(length(bbls), ESRI_BATCH_SIZE)
+    for r in ranges
+        chunk = bbls[r]
+        key_list = join(chunk, ", ")
+        query = "BBL IN ($key_list)"
+        result = esri_query(url, outfields, query)
+        for feat in result
+            attrs = feat["attributes"]
+            key = to_int(attrs["BBL"])
+            out[key] = attrs
+        end
+    end
+    return out
+end
+
 function bbl(borough, block, lot)
     if lot > 1000
         key, unit_name = condo_base_bbl_key(borough, block, lot)
         !ismissing(key) && return (condo_billing_bbl(key), unit_name)
     end 
     
-    (parse(Int, @sprintf("%s%05d%04d", borough_id_dict[borough], block, lot)), missing)
+    (standard_bbl(borough, block, lot), missing)
 end
 
 main()
