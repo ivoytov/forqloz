@@ -40,7 +40,6 @@ function discontinued_cases()
 end
 # Get filings. If WSS is set then we are running locally, otherwise on git.
 function main()
-    
     resume_case = requested_resume_case()
     rows = get_data()
     rows = resume_from_case(rows, resume_case)
@@ -59,14 +58,12 @@ function main()
     # Combine the filtered rows with the randomly selected rows
     rows = vcat(urgent_rows, sampled_rows)
     println("Task list: $(nrow(urgent_rows)) urgent cases, $(nrow(sampled_rows)) sampled rows, $(nrow(rows)) total tasks")
-    
+
     for (idx, row) in enumerate(eachrow(rows))
         if idx % 10 == 0
             println("Processing case $idx of $(nrow(rows))")
-        end    
-        ad_str = Dates.format(row.auction_date, dateformat"yyyy-mm-dd")
-        args = [row.case_number, row.borough, ad_str, row.missing_filings...]
-        run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), stdout, stderr), wait=true)
+        end
+        run_download_job(row.case_number, row.borough, row.auction_date, row.missing_filings)
     end
 end
 
@@ -167,6 +164,15 @@ function get_data()
     return rows
 end
 
+# Build a download task list for pipeline usage.
+build_download_jobs() = get_data()
+
+function run_download_job(case_number, borough, auction_date, missing_filings)
+    ad_str = auction_date === missing ? "" : Dates.format(auction_date, dateformat"yyyy-mm-dd")
+    args = [case_number, borough, ad_str, missing_filings...]
+    run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), stdout, stderr), wait=true)
+end
+
 function resume_from_case(rows::DataFrame, resume_case)
     resume_case === nothing && return rows
     resume_case_str = String(resume_case)
@@ -182,5 +188,6 @@ function resume_from_case(rows::DataFrame, resume_case)
 end
 
 
-# Main function
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

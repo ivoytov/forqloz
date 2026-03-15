@@ -78,9 +78,7 @@ end
 
 
 
-# Main function to calculate and export home price indices
-function main()
-    sales = initialize_data()
+function enrich_bbls_and_pluto()
     # Load lots from DB
     dbh = SQLite.DB(DB_PATH)
     auctions = DataFrame(DBInterface.execute(dbh, "SELECT * FROM lots"))
@@ -163,8 +161,18 @@ function main()
     end
 
 
+    SQLite.close(dbh)
+end
+
+# Main function to calculate and export home price indices
+function build_auction_sales()
+    sales = initialize_data()
+    # Load lots from DB
+    dbh = SQLite.DB(DB_PATH)
+    auctions = DataFrame(DBInterface.execute(dbh, "SELECT * FROM lots"))
+
     # Merge auctions and sales DataFrames
-    dropmissing!(auctions, [:block, :lot])    
+    dropmissing!(auctions, [:block, :lot])
     merged_df = innerjoin(sales, auctions, on = [:BOROUGH => :borough, :BLOCK => :block, :LOT => :lot])
     # Select only columns from sales DataFrame
     select!(merged_df, names(sales))
@@ -172,7 +180,7 @@ function main()
     # drop timeshares (condo hotels)
     exclude_prefixes = ["45", "25", "26", "28"]
     filter!(row -> !ismissing(row."BUILDING CLASS CATEGORY") &&
-        all(prefix -> !startswith(row."BUILDING CLASS CATEGORY", prefix), exclude_prefixes), merged_df)    
+        all(prefix -> !startswith(row."BUILDING CLASS CATEGORY", prefix), exclude_prefixes), merged_df)
     # Ensure "SALE DATE" is stored as ISO text not BLOB
     transform!(merged_df, "SALE DATE" => ByRow(d -> Dates.format(d, dateformat"yyyy-mm-dd")) => "SALE DATE")
 
@@ -209,6 +217,11 @@ function main()
     DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_sales_geo ON auction_sales(\"BOROUGH\", \"BLOCK\", \"LOT\")")
     DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_sales_date ON auction_sales(\"SALE DATE\")")
     SQLite.close(dbh)
+end
+
+function main()
+    enrich_bbls_and_pluto()
+    build_auction_sales()
 end
 
 function condo_base_bbl_key(borough, block, lot)
@@ -332,4 +345,6 @@ function bbl(borough, block, lot)
     (standard_bbl(borough, block, lot), missing)
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

@@ -175,7 +175,7 @@ function llm_extract_values(pdf_path)
 end
 
 # Prompt for winning bid
-function prompt_for_winning_bid(foreclosure_case; llm_values=nothing)
+function prompt_for_winning_bid(foreclosure_case; llm_values=nothing, interactive=is_interactive())
     case_number = foreclosure_case.case_number
 
     filename = replace(case_number, "/" => "-") * ".pdf"
@@ -183,29 +183,30 @@ function prompt_for_winning_bid(foreclosure_case; llm_values=nothing)
         
     case_label = "[Case $(replace(case_number, "/" => "-"))]"
     defaults = isnothing(llm_values) ? (judgement=nothing, upset_price=nothing, winning_bid=nothing) : llm_values
-    if is_interactive()
+    if interactive
         run(`open "$pdf_path"`)
     end
-    judgement = is_interactive() ? prompt("Enter judgement:", defaults.judgement; prefix=case_label) : defaults.judgement
-    upset_price = is_interactive() ? prompt("Enter upset price:", defaults.upset_price; prefix=case_label) : defaults.upset_price
-    winning_bid = is_interactive() ? prompt("Enter winning bid:", defaults.winning_bid; prefix=case_label) : defaults.winning_bid
+    judgement = interactive ? prompt("Enter judgement:", defaults.judgement; prefix=case_label) : defaults.judgement
+    upset_price = interactive ? prompt("Enter upset price:", defaults.upset_price; prefix=case_label) : defaults.upset_price
+    winning_bid = interactive ? prompt("Enter winning bid:", defaults.winning_bid; prefix=case_label) : defaults.winning_bid
 
     if isnothing(judgement) || judgement == "" || isnothing(winning_bid) || winning_bid == "" || isnothing(upset_price) || upset_price == ""
         println("Error: Missing values in the response.")
-        return
+        return :missing
     end
 
-    if is_interactive()
+    if interactive
         run(`osascript -e 'tell application "Preview" to close window 1'`)
     end
 
+    to_float(x) = x isa AbstractString ? parse(Float64, x) : Float64(x)
     row = (
         case_number=case_number, 
         borough=foreclosure_case.borough, 
         auction_date=foreclosure_case.auction_date,
-        judgement=parse(Float64, judgement),
-        upset_price=parse(Float64, upset_price),
-        winning_bid=parse(Float64, winning_bid)
+        judgement=to_float(judgement),
+        upset_price=to_float(upset_price),
+        winning_bid=to_float(winning_bid)
     )
 
     # insert the row into the bids table
@@ -216,6 +217,7 @@ function prompt_for_winning_bid(foreclosure_case; llm_values=nothing)
     finally
         SQLite.close(dbh)
     end
+    return :ok
 end
 
 # Get auction results
@@ -343,7 +345,7 @@ function notice_of_sale_path(case_number::AbstractString, auction_date)
 end
 
 # Extract block/lot/address from file
-function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
+function parse_notice_of_sale(pdf_path; prompt_prefix=nothing, interactive=is_interactive())
     # Extract text from PDF
     text = try
         extract_text_from_pdf(pdf_path)
@@ -352,7 +354,7 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
         return nothing
     end
     if text === :gm_failed
-        if is_interactive()
+        if interactive
             run(`open "$pdf_path"`)
             block = prompt("Enter block:", nothing; prefix=prompt_prefix)
             lot = prompt("Enter lot:", nothing; prefix=prompt_prefix)
@@ -388,7 +390,7 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
 
     block, lot = extract_block(text), extract_lot(text)
 
-    if is_interactive() && (isnothing(block) || isnothing(lot))
+    if interactive && (isnothing(block) || isnothing(lot))
         # Open the PDF file with the default application on macOS
         run(`open "$pdf_path"`)
 
@@ -495,6 +497,71 @@ function get_block_and_lot()
 
     # Convert updated rows back to CSV
     println("Database table 'lots' has been updated with missing block and lot values.")
+end
+
+# Pipeline helper: extract block/lot/address/judgement for one case.
+function extract_notice_of_sale(case_row; interactive=false)
+    pdf_path = notice_of_sale_path(case_row.case_number, case_row.auction_date)
+    case_label = "[Case $(replace(case_row.case_number, "/" => "-"))]"
+    values = parse_notice_of_sale(pdf_path; prompt_prefix=case_label, interactive=interactive)
+    if isnothing(values)
+        return :missing
+    end
+
+    row = (
+        case_number=case_row.case_number,
+        borough=case_row.borough,
+        block=values.block,
+        lot=values.lot,
+        address=isnothing(values.address) ? missing : values.address,
+        bbl=missing,
+        unit=missing,
+    )
+    dbh2 = db()
+    try
+        sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        addr = ismissing(row.address) ? nothing : row.address
+        DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
+    finally
+        SQLite.close(dbh2)
+    end
+
+    if !ismissing(values.judgement)
+        dbh3 = db()
+        try
+            exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
+            has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(case_row.auction_date))) |> DataFrame)
+            if has_row
+                update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
+                DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(case_row.auction_date)))
+            else
+                insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
+                DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(case_row.auction_date), values.judgement, nothing, nothing))
+            end
+        finally
+            SQLite.close(dbh3)
+        end
+    end
+    return :ok
+end
+
+# Pipeline helper: extract bid values for one case.
+function extract_bids(case_row; use_llm=true, interactive=false)
+    filename = replace(case_row.case_number, "/" => "-") * ".pdf"
+    pdf_path = joinpath("web/saledocs/surplusmoney", filename)
+    llm_values = nothing
+    if use_llm
+        llm_values = try
+            llm_extract_values(pdf_path)
+        catch e
+            println("Error extracting values for $(case_row.case_number): $e")
+            nothing
+        end
+        if llm_values === :gm_failed
+            return :missing
+        end
+    end
+    return prompt_for_winning_bid(case_row; llm_values=llm_values, interactive=interactive)
 end
 
 
