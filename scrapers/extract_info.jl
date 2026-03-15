@@ -9,6 +9,10 @@ function db()
     return conn
 end
 
+function is_interactive()
+    return ("-i" ∈ ARGS || haskey(ENV, "WSS")) && !("--no-interaction" ∈ ARGS)
+end
+
 # Function to prompt with a default answer
 function prompt(question, default_answer; prefix=nothing)
     label = isnothing(prefix) ? "" : string(prefix, " ")
@@ -94,7 +98,12 @@ function extract_text_from_pdf(pdf_path)
     text_path = case_number # .txt gets appended automatically
 
     # Call the GraphicsMagick command
-    run(pipeline(`gm convert -append -density 330 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
+    try
+        run(pipeline(`gm convert -append -density 330 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
+    catch e
+        println("Error running gm convert: $e")
+        return :gm_failed
+    end
 
     
     run_tesseract(image_path, text_path, lang="eng", user_defined_dpi=330)
@@ -104,7 +113,7 @@ function extract_text_from_pdf(pdf_path)
     return text
 end
 
-function extract_llm_values(pdf_path; prompt_prefix=nothing)
+function llm_extract_values(pdf_path)
     case_number = basename(pdf_path)[1:end-4]
     image_path = case_number * ".png"
 
@@ -113,7 +122,7 @@ function extract_llm_values(pdf_path; prompt_prefix=nothing)
         run(pipeline(`gm convert -append -density 330 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
     catch e
         println("Error running gm convert: $e")
-        return nothing
+        return :gm_failed
     end
     
     # Read the image and encode it to Base64
@@ -128,60 +137,54 @@ function extract_llm_values(pdf_path; prompt_prefix=nothing)
     
     r = create_chat(
         provider,
-        "gpt-4o-mini",
+        "gpt-5-mini",
         [Dict("role" => "user", "content" => [
-            Dict("type" => "text", "text" => "I need help extracting the judgment, upset price, and the sale price (winning bid) from this document. Return the answer in JSON format like this: { \"judgement\": 100000, \"upset_price\": 200000, \"winning_bid\": 300000 }"),
+            Dict("type" => "text", "text" => "Extracting the amount of final judgement of foreclosure, upset price, and the sale price of property (winning bid) from this document. If the purchaser is specified as Plaintiff, then return the sale price as \$100 exactly (even if a different amount is listed on the form). Return the answer in JSON format like this: { \"judgement\": 100000, \"upset_price\": 200000, \"winning_bid\": 300000 }"),
             Dict("type" => "image_url", "image_url" => Dict("url" => "data:image/png;base64," * base64_image))
         ])];
-        max_tokens = 300,
         response_format = Dict("type" => "json_object")
     )
 
     parsed_response = r.response[:choices][1][:message][:content] |> JSON3.read
-
-    # Access structured data
-    judgement = prompt("Enter judgement:", parsed_response["judgement"]; prefix=prompt_prefix)
-    upset_price = prompt("Enter upset price:", parsed_response["upset_price"]; prefix=prompt_prefix)
-    winning_bid = prompt("Enter winning bid:", parsed_response["winning_bid"]; prefix=prompt_prefix)
-
-    if isnothing(judgement) || judgement == "" || isnothing(winning_bid) || winning_bid == "" || isnothing(upset_price) || upset_price == ""
-        println("Error: Missing values in the response.")
-        return nothing
-    end
-
     return (
-        judgement=parse(Float64, judgement), 
-        upset_price=parse(Float64,upset_price), 
-        winning_bid=parse(Float64, winning_bid)
+        judgement=parsed_response["judgement"],
+        upset_price=parsed_response["upset_price"],
+        winning_bid=parsed_response["winning_bid"]
     )
 end
 
 # Prompt for winning bid
-function prompt_for_winning_bid(foreclosure_case)
+function prompt_for_winning_bid(foreclosure_case; llm_values=nothing)
     case_number = foreclosure_case.case_number
 
-    # Extract text from PDF manually
     filename = replace(case_number, "/" => "-") * ".pdf"
     pdf_path = joinpath("web/saledocs/surplusmoney", filename)
-    run(`open "$pdf_path"`)
         
     case_label = "[Case $(replace(case_number, "/" => "-"))]"
-    prices = extract_llm_values(pdf_path; prompt_prefix=case_label)
+    defaults = isnothing(llm_values) ? (judgement=nothing, upset_price=nothing, winning_bid=nothing) : llm_values
+    if is_interactive()
+        run(`open "$pdf_path"`)
+    end
+    judgement = is_interactive() ? prompt("Enter judgement:", defaults.judgement; prefix=case_label) : defaults.judgement
+    upset_price = is_interactive() ? prompt("Enter upset price:", defaults.upset_price; prefix=case_label) : defaults.upset_price
+    winning_bid = is_interactive() ? prompt("Enter winning bid:", defaults.winning_bid; prefix=case_label) : defaults.winning_bid
 
-    if isnothing(prices)
-        println("Error extracting values from $pdf_path")
+    if isnothing(judgement) || judgement == "" || isnothing(winning_bid) || winning_bid == "" || isnothing(upset_price) || upset_price == ""
+        println("Error: Missing values in the response.")
         return
     end
 
-    run(`osascript -e 'tell application "Preview" to close window 1'`)
+    if is_interactive()
+        run(`osascript -e 'tell application "Preview" to close window 1'`)
+    end
 
     row = (
         case_number=case_number, 
         borough=foreclosure_case.borough, 
         auction_date=foreclosure_case.auction_date,
-        judgement=prices.judgement,
-        upset_price=prices.upset_price,
-        winning_bid=prices.winning_bid
+        judgement=parse(Float64, judgement),
+        upset_price=parse(Float64, upset_price),
+        winning_bid=parse(Float64, winning_bid)
     )
 
     # insert the row into the bids table
@@ -218,8 +221,40 @@ function get_auction_results()
     sort!(cases, order(:auction_date, rev=true))
 
 
+    concurrency = tryparse(Int, get(ENV, "LLM_CONCURRENCY", "4"))
+    concurrency = (concurrency === nothing || concurrency < 1) ? 1 : concurrency
+    sem = Base.Semaphore(concurrency)
+    tasks = Dict{String, Task}()
+
     for foreclosure_case in eachrow(cases)
-        prompt_for_winning_bid(foreclosure_case)
+        filename = replace(foreclosure_case.case_number, "/" => "-") * ".pdf"
+        pdf_path = joinpath("web/saledocs/surplusmoney", filename)
+        tasks[foreclosure_case.case_number] = Threads.@spawn begin
+            Base.acquire(sem)
+            try
+                return llm_extract_values(pdf_path)
+            finally
+                Base.release(sem)
+            end
+        end
+    end
+
+    for foreclosure_case in eachrow(cases)
+        task = tasks[foreclosure_case.case_number]
+        llm_values = try
+            fetch(task)
+        catch e
+            println("Error extracting values for $(foreclosure_case.case_number): $e")
+            nothing
+        end
+        if llm_values === :gm_failed
+            if is_interactive()
+                println("Falling back to manual entry for $(foreclosure_case.case_number) due to gm convert failure.")
+                prompt_for_winning_bid(foreclosure_case; llm_values=nothing)
+            end
+            continue
+        end
+        prompt_for_winning_bid(foreclosure_case; llm_values=llm_values)
     end
 
 
@@ -295,6 +330,24 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
         println("Error extracting text from $pdf_path: $e")
         return nothing
     end
+    if text === :gm_failed
+        if is_interactive()
+            run(`open "$pdf_path"`)
+            block = prompt("Enter block:", nothing; prefix=prompt_prefix)
+            lot = prompt("Enter lot:", nothing; prefix=prompt_prefix)
+            run(`osascript -e 'tell application "Preview" to close window 1'`)
+            if isnothing(block) || isnothing(lot)
+                println("Error: Missing block or lot in $pdf_path")
+                return nothing
+            end
+            return (
+                block=parse(Int, block),
+                lot=parse(Int, lot),
+                address=missing,
+            )
+        end
+        return nothing
+    end
     text = replace(text, "\n" => " ")
 
     if !isnothing(detect_time_share(text))
@@ -311,7 +364,7 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
 
     block, lot = extract_block(text), extract_lot(text)
 
-    if ("-i" ∈ ARGS || haskey(ENV, "WSS")) && (isnothing(block) || isnothing(lot))
+    if is_interactive() && (isnothing(block) || isnothing(lot))
         # Open the PDF file with the default application on macOS
         run(`open "$pdf_path"`)
 
@@ -406,7 +459,7 @@ end
 # Main function
 function main()
     get_block_and_lot()
-    if "-i" ∈ ARGS || haskey(ENV, "WSS")
+    if is_interactive() || "--no-interaction" ∈ ARGS
         get_auction_results()
     end
 end
