@@ -267,6 +267,10 @@ const columnDefs = [
         minWidth: 120,
     },
     {
+        headerName: "Judgement", field: "judgement", type: ["currency", "rightAligned"],
+        minWidth: 150,
+    },
+    {
         headerName: "Upset Price", field: "upset_price", type: ["currency", "rightAligned"],
         minWidth: 150,
     },
