@@ -48,6 +48,27 @@ function extract_address(text)
     return extract_pattern(text, patterns)
 end
 
+# Function to extract approximate judgement / lien amount
+function extract_judgement_amount(text)
+    patterns = [
+        r"\bJudg(?:e)?ment\s+amount\s*[-:]\s*\$([0-9]{1,3}(?:[.,][0-9]{3})+\.\d{2})"i,
+        r"\bApprox(?:imate)?\.?\s+(?:amount|amt)\s+of\s+(?:the\s+current\s+)?(?:judg(?:e)?ment(?:\s+lien)?|lien)\s*(?:is\s*)?\$([0-9]{1,3}(?:[.,][0-9]{3})+\.\d{2})"i,
+        r"\bApprox(?:imate)?\.?\s+(?:amount|amt)\s+of\s+judg(?:e)?ment\s*(?:is\s*)?\$([0-9]{1,3}(?:[.,][0-9]{3})+\.\d{2})"i,
+    ]
+    m = extract_pattern(text, patterns)
+    if m === nothing
+        return missing
+    end
+    # Normalize thousands separators (comma or dot) before parsing
+    normalized = replace(m, "," => "")
+    if count(==('.'), normalized) > 1
+        normalized = replace(normalized, "." => "")
+        # restore decimal point before last two digits
+        normalized = string(normalized[1:end-2], ".", normalized[end-1:end])
+    end
+    return parse(Float64, normalized)
+end
+
 
 # Function to extract block
 function extract_block(text)
@@ -344,17 +365,20 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
                 block=parse(Int, block),
                 lot=parse(Int, lot),
                 address=missing,
+                judgement=missing,
             )
         end
         return nothing
     end
     text = replace(text, "\n" => " ")
+    judgement = extract_judgement_amount(text)
 
     if !isnothing(detect_time_share(text))
         return (
             block=1006, 
             lot=1302,
-            address= missing
+            address= missing,
+            judgement=judgement,
         )
     end
 
@@ -384,6 +408,7 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing)
         block=parse(Int, block),
         lot=parse(Int, lot),
         address=extract_address(text),
+        judgement=judgement,
     )
 end
 
@@ -449,6 +474,23 @@ function get_block_and_lot()
         finally
             SQLite.close(dbh2)
         end
+
+        if !ismissing(values.judgement)
+            dbh3 = db()
+            try
+                exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
+                has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(row.auction_date))) |> DataFrame)
+                if has_row
+                    update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
+                    DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(row.auction_date)))
+                else
+                    insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
+                    DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(row.auction_date), values.judgement, nothing, nothing))
+                end
+            finally
+                SQLite.close(dbh3)
+            end
+        end
     end
 
     # Convert updated rows back to CSV
@@ -464,4 +506,6 @@ function main()
     end
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
