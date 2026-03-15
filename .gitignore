@@ -38,3 +38,4 @@ scrapers/test.js
 *.sqlite-shm
 HPD_Registration_Open_Data.pdf
 *.csv
+web/foreclosures/pipeline.lock
