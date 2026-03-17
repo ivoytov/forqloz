@@ -4,7 +4,7 @@ import path from 'path';
 import { existsSync, appendFile } from 'fs';
 
 
-const SBR_WS_ENDPOINT = `wss://${process.env.BRIGHTDATA_AUTH}@brd.superproxy.io:9222`;
+const LOCAL_CHROME_URL = "http://localhost:9222";
 const url = "https://iapps.courts.state.ny.us/nyscef/CaseSearch"
 
 
@@ -47,12 +47,14 @@ function missing_filings(index_number, auction_date) {
 }
 
 
-export async function download_filing(index_number, county, auction_date, missingFilings, endpoint = SBR_WS_ENDPOINT,) {
+export async function download_filing(index_number, county, auction_date, missingFilings, endpoint = LOCAL_CHROME_URL,) {
     const browser = await connect({
-        browserWSEndpoint: endpoint,
+        browserURL: endpoint,
     });
 
-    const page = await browser.newPage();
+    const pages = await browser.pages();
+    const page = pages[0] ?? await browser.newPage();
+    const reusedExistingPage = pages.length > 0;
     page.setDefaultNavigationTimeout(60_000);
     page.setDefaultTimeout(60_000);
 
@@ -61,7 +63,9 @@ export async function download_filing(index_number, county, auction_date, missin
         if (cleanedUp) return;
         cleanedUp = true;
         try {
-            await page.close();
+            if (!reusedExistingPage) {
+                await page.close();
+            }
         } catch (err) {
             console.warn(index_number, 'Failed to close case page', err);
         }
@@ -143,18 +147,6 @@ export async function download_filing(index_number, county, auction_date, missin
             // console.warn(`\n\n${index_number} couldn't find a valid case with this index`)
             return finish({ error: 'Failed to find case in CEF' });
         }
-
-        if (endpoint == SBR_WS_ENDPOINT) {
-            const client = await page.createCDPSession(page);
-            const { status } = await client.send('Captcha.waitForSolve', {
-                detectTimeout: 10 * 1000,
-            });
-            console.log(`Captcha status: ${status}`);
-            if (status === 'solve_failed') {
-                return finish({ error: "captcha solve failed" })
-            }
-        }
-
 
         const availableFilings = await page.$$eval("select#selDocumentType > option", options => {
             return options.map(el => el.value)
@@ -294,7 +286,7 @@ export async function download_filing(index_number, county, auction_date, missin
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-    const endpoint = process.env.WSS ?? SBR_WS_ENDPOINT;
+    const endpoint = LOCAL_CHROME_URL;
     let auction_date = new Date(process.argv[4]);
     if (isNaN(auction_date)) auction_date = null;
 
