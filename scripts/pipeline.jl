@@ -7,7 +7,6 @@ using DataFrames
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
 const DB_PATH = normpath(joinpath(ROOT, "web", "foreclosures", "foreclosures.sqlite"))
-const LOCK_PATH = normpath(joinpath(ROOT, "web", "foreclosures", "pipeline.lock"))
 const DB_WRITE_LOCK = ReentrantLock()
 
 include(joinpath(ROOT, "scrapers", "download_case_filings.jl"))
@@ -23,18 +22,6 @@ end
 
 now_iso() = Dates.format(now(), dateformat"yyyy-mm-ddTHH:MM:SS")
 
-function acquire_lock()
-    if isfile(LOCK_PATH)
-        error("Pipeline already running (lock file exists at $LOCK_PATH). Remove it if stale.")
-    end
-    open(LOCK_PATH, "w") do io
-        write(io, string(getpid()))
-    end
-end
-
-function release_lock()
-    isfile(LOCK_PATH) && rm(LOCK_PATH)
-end
 
 function migrate_schema()
     lock(DB_WRITE_LOCK) do
@@ -152,9 +139,19 @@ function enqueue_job(run_id, type, case_number, borough, auction_date)
         dbh = db()
         try
             existing = DBInterface.execute(dbh,
-                "SELECT 1 FROM jobs WHERE type = ? AND case_number = ? AND borough = ? AND auction_date = ? AND status IN ('pending','running','retry','review') LIMIT 1",
+                "SELECT id, status FROM jobs WHERE type = ? AND case_number = ? AND borough = ? AND auction_date = ? AND status IN ('pending','running','retry','review') LIMIT 1",
                 (type, case_number, borough, string(auction_date))) |> DataFrame
             if nrow(existing) > 0
+                status = existing[1, :status]
+                if status == "running"
+                    DBInterface.execute(dbh,
+                        "UPDATE jobs SET run_id = ? WHERE id = ?",
+                        (run_id, existing[1, :id]))
+                else
+                    DBInterface.execute(dbh,
+                        "UPDATE jobs SET run_id = ?, status = 'pending', next_attempt_at = NULL, updated_at = ? WHERE id = ?",
+                        (run_id, now_iso(), existing[1, :id]))
+                end
                 return
             end
             DBInterface.execute(dbh,
@@ -166,22 +163,48 @@ function enqueue_job(run_id, type, case_number, borough, auction_date)
     end
 end
 
-function list_jobs(type; statuses=["pending", "retry"])
+function list_jobs(type; statuses=["pending", "retry"], prioritize_run_id=nothing)
     dbh = db()
     try
         status_list = join(["'$(s)'" for s in statuses], ",")
         nowstr = now_iso()
+        run_priority_sql = prioritize_run_id === nothing ? "" : "CASE WHEN run_id = $(prioritize_run_id) THEN 0 ELSE 1 END,"
+        due_filter_sql = prioritize_run_id === nothing ?
+            "(next_attempt_at IS NULL OR next_attempt_at <= '$nowstr')" :
+            "(run_id = $(prioritize_run_id) OR next_attempt_at IS NULL OR next_attempt_at <= '$nowstr')"
         sql = """
             SELECT id, case_number, borough, auction_date, attempts
             FROM jobs
             WHERE type = '$type'
               AND status IN ($status_list)
-              AND (next_attempt_at IS NULL OR next_attempt_at <= '$nowstr')
-            ORDER BY updated_at ASC
+              AND $due_filter_sql
+            ORDER BY $run_priority_sql auction_date DESC, updated_at ASC
         """
         return DataFrame(DBInterface.execute(dbh, sql))
     finally
         SQLite.close(dbh)
+    end
+end
+
+function reclaim_run_jobs(run_id, type)
+    run_id === nothing && return
+    lock(DB_WRITE_LOCK) do
+        dbh = db()
+        try
+            DBInterface.execute(dbh,
+                """
+                UPDATE jobs
+                SET status = 'pending',
+                    next_attempt_at = NULL,
+                    updated_at = ?
+                WHERE run_id = ?
+                  AND type = ?
+                  AND status IN ('running', 'retry', 'review')
+                """,
+                (now_iso(), run_id, type))
+        finally
+            SQLite.close(dbh)
+        end
     end
 end
 
@@ -354,9 +377,10 @@ function sync_calendar(run_id)
     end
 end
 
-function sync_filings()
+function sync_filings(run_id=nothing)
     println("Stage: sync-filings")
-    jobs = list_jobs("download_filing")
+    reclaim_run_jobs(run_id, "download_filing")
+    jobs = list_jobs("download_filing"; prioritize_run_id=run_id)
     if nrow(jobs) == 0
         println("No download_filing jobs pending.")
         return
@@ -698,12 +722,11 @@ end
 
 function run_pipeline()
     migrate_schema()
-    acquire_lock()
     run_id = start_run()
     status = "done"
     try
         sync_calendar(run_id)
-        sync_filings()
+        sync_filings(run_id)
         extract_nos()
         extract_bids_stage()
         enrich_pluto_stage()
@@ -714,7 +737,6 @@ function run_pipeline()
         rethrow()
     finally
         finish_run(run_id, status)
-        release_lock()
     end
 end
 

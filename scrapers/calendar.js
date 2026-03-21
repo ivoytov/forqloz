@@ -7,8 +7,7 @@ function sleep(s) {
     return new Promise(resolve => setTimeout(resolve, s * 1000));
 }
 
-const SBR_WS_ENDPOINT = `wss://${process.env.BRIGHTDATA_AUTH}@brd.superproxy.io:9222`;
-const endpoint = process.argv.includes('--browser') ? process.argv[process.argv.indexOf('--browser') + 1] : process.env.WSS ?? SBR_WS_ENDPOINT;
+const endpoint = 'http://localhost:9222';
 
 console.log('Connecting to Scraping Browser...');
 
@@ -39,18 +38,27 @@ let auctionLots = []
 let maxDate = new Date()
 maxDate.setDate(maxDate.getDate() + 21)
 maxDate = maxDate.toISOString().split('T')[0]
-for (const borough in boroughConfigDict) {
-    try {
-        const newLots = await getAuctionLots(borough, boroughConfigDict[borough], maxDate)
-        if (newLots === null) {
-            console.log(`Scraper for ${borough} returned null`)
-            continue
+const browser = await connect({
+    browserURL: endpoint,
+});
+const page = await browser.newPage();
+
+try {
+    for (const borough in boroughConfigDict) {
+        try {
+            const newLots = await getAuctionLots(page, borough, boroughConfigDict[borough], maxDate)
+            if (newLots === null) {
+                console.log(`Scraper for ${borough} returned null`)
+                continue
+            }
+            console.log(`Scraped ${newLots.length} total foreclosure cases for ${borough}`)
+            auctionLots = [...auctionLots, ...newLots]
+        } catch (e) {
+            console.warn(`${borough} scraper failed.`, e)
         }
-        console.log(`Scraped ${newLots.length} total foreclosure cases for ${borough}`)
-        auctionLots = [...auctionLots, ...newLots]
-    } catch (e) {
-        console.warn(`${borough} scraper failed.`, e)
     }
+} finally {
+    browser.disconnect();
 }
 
 // Update SQLite cases table instead of CSV
@@ -85,13 +93,7 @@ console.log('Database has been updated with new foreclosure cases via UPSERT.');
 process.exit();
 
 
-async function getAuctionLots(borough, { courtId, calendarId }, maxDate) {
-    const browser = await connect({
-        browserWSEndpoint: endpoint,
-    });
-
-    const page = await browser.newPage();
-
+async function getAuctionLots(page, borough, { courtId, calendarId }, maxDate) {
     console.log('Connected! Navigating...');
     const url = 'https://iapps.courts.state.ny.us/webcivil/FCASCalendarSearch';
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 2 * 60 * 1000 });
@@ -107,24 +109,12 @@ async function getAuctionLots(borough, { courtId, calendarId }, maxDate) {
         page.waitForNavigation({ waitUntil: 'networkidle2' }),
         page.locator("input#btnFindCalendar").click(),
     ])
-    if (courtId == boroughConfigDict['Queens'].courtId && endpoint != SBR_WS_ENDPOINT) {
+    if (courtId == boroughConfigDict['Queens'].courtId) {
         console.log("Waiting for captcha")
         await sleep(10)
     }
     
 
-
-    if (endpoint == SBR_WS_ENDPOINT) {
-        const client = await page.createCDPSession(page);
-        const { status } = await client.send('Captcha.waitForSolve', {
-            detectTimeout: 10 * 1000,
-        });
-        console.log(`Captcha status: ${status}`);
-        if (status === 'solve_failed'){
-            return { error: "captcha solve failed"}
-        }
-        // await inspect(client)
-    }
 
     // check if there is an option to select on page
     if (await page.$("input#btnApply")) {
@@ -164,8 +154,6 @@ async function getAuctionLots(borough, { courtId, calendarId }, maxDate) {
         return res;
 
     });
-    browser.disconnect();
-
     console.log(`Scraped ${auctionLots.length} total foreclosure cases.`)
     const filteredLots = auctionLots.filter(({ auction_date }) => auction_date < maxDate)
         .map(lot => ({ borough: borough, ...lot }))
