@@ -6,6 +6,7 @@ const ISO_DATEFORMAT = dateformat"yyyy-mm-dd"
 const WEEKLY_BAR_OUTPUT = "manhattan_weekly_foreclosures.png"
 const WEEKLY_CALENDAR_HEATMAP_OUTPUT = "manhattan_weekly_foreclosures_calendar_heatmap.png"
 const CALENDAR_HEATMAP_ARG = "--calendar-heatmap"
+const STATS_ARG = "--stats"
 const SCATTER_BLDG_CLASSES = Set([
     "CONDOMINIUMS",
     "ONE FAMILY DWELLINGS",
@@ -200,6 +201,35 @@ function render_weekly_calendar_heatmap(weekly_counts; borough=nothing, output_p
     save(output_path, weekly_fig)
 end
 
+function compute_auction_stats(auctions, borough=nothing)
+    # Filter by borough if specified
+    if !isnothing(borough)
+        auctions = filter(:borough => x -> x == borough, auctions)
+    end
+    
+    # Group by case to get unique auctions
+    grouped = groupby(auctions, [:case_number, :borough, :auction_date])
+    total_lots = length(grouped)
+    
+    # Sold: cases where at least one lot has winning_bid
+    sold_count = 0
+    sold_low = 0
+    sold_high = 0
+    for g in grouped
+        if any(!ismissing, g.winning_bid)
+            sold_count += 1
+            bid = first(skipmissing(g.winning_bid))
+            if bid <= 100
+                sold_low += 1
+            else
+                sold_high += 1
+            end
+        end
+    end
+    
+    return (total_lots, sold_count, sold_low, sold_high)
+end
+
 auction_window_end = today() + Month(2)
 auction_window_start = auction_window_end - Month(12)
 query_window_start = min(auction_window_start, WEEKLY_START_DATE)
@@ -311,10 +341,23 @@ line_45 = data(line_data) * mapping(:x => identity, :x => identity) * visual(Lin
     linewidth = 1,
 )
 
+borough = getarg("--borough")
+
+if hasarg(STATS_ARG)
+    total_lots, sold_count, sold_low, sold_high = compute_auction_stats(auctions, borough)
+    if !isnothing(borough)
+        println("Borough: $borough")
+    end
+    println("Total auction lots: $total_lots")
+    println("Sold: $sold_count")
+    println("Sold for <=\$100: $sold_low")
+    println("Sold for >\$100: $sold_high")
+    exit(0)
+end
+
 res = AlgebraOfGraphics.draw(plt + line_45; axis = axis)
 save("stats.png", res)
 
-borough = getarg("--borough")
 weekly_counts = weekly_sales_counts(auctions, borough)
 render_weekly_bar_chart(weekly_counts; borough=borough)
 

@@ -2,6 +2,7 @@
     "liveServer.settings.port": 5501,
     "julia.environmentPath": "/Users/ilya/code/forqloz/scrapers",
     "chat.tools.terminal.autoApprove": {
-        "julia": true
+        "julia": true,
+        "timeout": true
     }
 }
