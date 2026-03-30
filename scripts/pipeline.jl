@@ -377,6 +377,40 @@ function sync_calendar(run_id)
     end
 end
 
+function enqueue_missing_jobs(run_id)
+    println("Stage: enqueue-missing-jobs")
+    dbh = db()
+    try
+        cases = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough, auction_date FROM cases"))
+        lots = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough FROM lots"))
+        bids = DataFrame(DBInterface.execute(dbh, "SELECT case_number, borough, auction_date FROM bids"))
+        cases.auction_date = [ismissing(x) ? missing : Date(x, dateformat"yyyy-mm-dd") for x in cases.auction_date]
+        bids.auction_date = [ismissing(x) ? missing : Date(x, dateformat"yyyy-mm-dd") for x in bids.auction_date]
+
+        missing_lots = antijoin(cases, lots, on=[:case_number, :borough])
+        for row in eachrow(missing_lots)
+            pdf_path = notice_of_sale_path(row.case_number, row.auction_date)
+            if isfile(pdf_path)
+                enqueue_job(run_id, "extract_nos", row.case_number, row.borough, row.auction_date)
+            end
+        end
+
+        for row in eachrow(cases)
+            filename = replace(row.case_number, "/" => "-") * ".pdf"
+            pdf_path = joinpath(ROOT, "web", "saledocs", "surplusmoney", filename)
+            if !isfile(pdf_path)
+                continue
+            end
+            existing = filter(r -> r.case_number == row.case_number && r.borough == row.borough && r.auction_date == row.auction_date, eachrow(bids))
+            if isempty(existing)
+                enqueue_job(run_id, "extract_bids", row.case_number, row.borough, row.auction_date)
+            end
+        end
+    finally
+        SQLite.close(dbh)
+    end
+end
+
 function sync_filings(run_id=nothing)
     println("Stage: sync-filings")
     reclaim_run_jobs(run_id, "download_filing")
@@ -764,6 +798,8 @@ function main()
         run_pipeline()
     elseif cmd == "sync-calendar"
         run_with_run(sync_calendar)
+    elseif cmd == "enqueue-missing-jobs"
+        run_with_run(enqueue_missing_jobs)
     elseif cmd == "sync-filings"
         run_with_run(_ -> sync_filings())
     elseif cmd == "extract-nos"
