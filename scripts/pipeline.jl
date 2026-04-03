@@ -237,7 +237,7 @@ function retry_at(attempts)
     return Dates.format(now() + Minute(minutes), dateformat"yyyy-mm-ddTHH:MM:SS")
 end
 
-const SURPLUS_SCHEDULE_DAYS = [1, 2, 3, 6, 9, 12, 19, 30]
+const SURPLUS_SCHEDULE_DAYS = [1, 2, 4, 7, 14, 28]
 
 function next_surplus_attempt(auction_date)
     auction_date === missing && return nothing
@@ -803,7 +803,10 @@ function main()
     elseif cmd == "sync-filings"
         run_with_run(_ -> sync_filings())
     elseif cmd == "extract-nos"
-        run_with_run(_ -> extract_nos())
+        run_with_run(run_id -> begin
+            enqueue_missing_jobs(run_id)
+            extract_nos()
+        end)
     elseif cmd == "extract-bids"
         run_with_run(_ -> extract_bids_stage())
     elseif cmd == "enrich-pluto"
