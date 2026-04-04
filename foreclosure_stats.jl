@@ -7,7 +7,7 @@ const WEEKLY_BAR_OUTPUT = "manhattan_weekly_foreclosures.png"
 const WEEKLY_CALENDAR_HEATMAP_OUTPUT = "manhattan_weekly_foreclosures_calendar_heatmap.png"
 const CALENDAR_HEATMAP_ARG = "--calendar-heatmap"
 const STATS_ARG = "--stats"
-const SCATTER_BLDG_CLASSES = Set([
+const BLDG_CLASSES = Set([
     "CONDOMINIUMS",
     "ONE FAMILY DWELLINGS",
     "TWO FAMILY DWELLINGS",
@@ -290,7 +290,7 @@ SQLite.close(dbh)
 
 scatter_auctions = subset(
     copy(auctions),
-    :BldgClass => ByRow(x -> x ∈ SCATTER_BLDG_CLASSES),
+    :BldgClass => ByRow(x -> x ∈ BLDG_CLASSES),
     :auction_date => ByRow(x -> !ismissing(x) && x >= auction_window_start),
 )
 

@@ -51,7 +51,7 @@ function date_from_file_creation(path)
     return Date(Dates.unix2datetime(round(Int, ts)))
 end
 
-function smf_timing_by_county(; thresholds=[3, 7, 10, 14, 21, 30])
+function smf_timing_by_county(; thresholds=[3, 7, 10, 14, 21, 30], start_year=nothing)
     thresholds = sort!(unique(Int.(thresholds)))
     df = DataFrame()
 
@@ -72,6 +72,9 @@ function smf_timing_by_county(; thresholds=[3, 7, 10, 14, 21, 30])
         for row in eachrow(cases)
             auction_date = parse_iso_date(row.auction_date)
             ismissing(auction_date) && continue
+            if start_year !== nothing && year(auction_date) < start_year
+                continue
+            end
             key = normalize_case_number(row.case_number)
             case_lookup[key] = (county=row.county, case_number=string(row.case_number), auction_date=auction_date)
         end
@@ -170,13 +173,33 @@ end
 
 function main(args)
     out_csv = nothing
-    for arg in args
+    start_year = nothing
+
+    i = 1
+    while i <= length(args)
+        arg = args[i]
         if startswith(arg, "--csv=")
             out_csv = split(arg, "=", limit=2)[2]
+        elseif arg == "--start-year"
+            if i == length(args)
+                error("Missing value for --start-year")
+            end
+            i += 1
+            parsed = tryparse(Int, args[i])
+            parsed === nothing && error("Invalid --start-year value: $(args[i])")
+            start_year = parsed
+        elseif startswith(arg, "--start-year=")
+            parsed = tryparse(Int, split(arg, "=", limit=2)[2])
+            parsed === nothing && error("Invalid --start-year value in: $arg")
+            start_year = parsed
         end
+        i += 1
     end
 
-    df = smf_timing_by_county(thresholds=[3, 7, 10, 14, 21, 30])
+    df = smf_timing_by_county(thresholds=[3, 7, 10, 14, 21, 30], start_year=start_year)
+    if start_year !== nothing
+        println("Auction date filter: start_year >= $start_year")
+    end
     print_smf_timing_table(df)
     if out_csv !== nothing && !isempty(strip(out_csv))
         CSV.write(out_csv, df)
