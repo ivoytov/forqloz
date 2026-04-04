@@ -128,6 +128,9 @@ function finish_run(run_id, status)
             DBInterface.execute(dbh,
                 "UPDATE runs SET finished_at = ?, status = ? WHERE id = ?",
                 (now_iso(), status, run_id))
+            # Browser sql.js reads the main SQLite file only (not WAL sidecars),
+            # so checkpoint WAL at run end to persist all staged updates.
+            DBInterface.execute(dbh, "PRAGMA wal_checkpoint(TRUNCATE);")
         finally
             SQLite.close(dbh)
         end

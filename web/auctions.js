@@ -45,8 +45,8 @@ async function loadDB() {
                 CASE WHEN bids.winning_bid > 100 THEN bids.winning_bid - bids.upset_price END AS over_bid,
                 pluto.Address AS pluto_address,
                 pluto.ZipCode,
-                substr(building_class.name, 0, instr(building_class.name, ':')) as LandUse,
-                building_class.name as BldgClass,
+                COALESCE(substr(building_class.name, 0, instr(building_class.name, ':')), pluto.BldgClass) as LandUse,
+                COALESCE(building_class.name, pluto.BldgClass) as BldgClass,
                 pluto.OwnerName,
                 pluto.YearBuilt,
                 pluto.YearAlter1,
@@ -326,7 +326,15 @@ function zoomToBlock(event) {
         return
     }
 
-    map.fitBounds(markers[event.node.data.BBL][0].getBounds(), { maxZoom: 15 })
+    const markerKey = String(event?.node?.data?.BBL);
+    if (markerKey === "null" || markerKey === "undefined") {
+        return;
+    }
+    const entry = markers[markerKey];
+    if (!entry || entry.length === 0) {
+        return;
+    }
+    map.fitBounds(entry[0].getBounds(), { maxZoom: 15 })
 
 }
 
@@ -516,10 +524,11 @@ async function onGridFilterChanged() {
             marker.on('click', onClickTableZoom)
 
             // Store the marker in the markers object
-            if (!markers[data.BBL]) {
-                markers[data.BBL] = []
+            const markerKey = String(data.BBL);
+            if (!markers[markerKey]) {
+                markers[markerKey] = []
             }
-            markers[data.BBL].push(layer);
+            markers[markerKey].push(layer);
         }
     } finally {
         setLoading(false);
