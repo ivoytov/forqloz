@@ -5,8 +5,18 @@ DotEnv.load!()
 const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "foreclosures.sqlite"))
 function db()
     conn = SQLite.DB(DB_PATH)
-    DBInterface.execute(conn, "PRAGMA journal_mode=DELETE;")
+    DBInterface.execute(conn, "PRAGMA journal_mode=WAL;")
+    DBInterface.execute(conn, "PRAGMA busy_timeout=5000;")
     return conn
+end
+
+function with_db_write_lock(f::Function)
+    if isdefined(@__MODULE__, :DB_WRITE_LOCK)
+        lock(getfield(@__MODULE__, :DB_WRITE_LOCK)) do
+            return f()
+        end
+    end
+    return f()
 end
 
 function is_interactive()
@@ -209,13 +219,14 @@ function prompt_for_winning_bid(foreclosure_case; llm_values=nothing, interactiv
         winning_bid=to_float(winning_bid)
     )
 
-    # insert the row into the bids table
-    dbh = db()
-    try
-        sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
-        DBInterface.execute(dbh, sql, (row.case_number, row.borough, string(row.auction_date), row.judgement, row.upset_price, row.winning_bid))
-    finally
-        SQLite.close(dbh)
+    with_db_write_lock() do
+        dbh = db()
+        try
+            sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
+            DBInterface.execute(dbh, sql, (row.case_number, row.borough, string(row.auction_date), row.judgement, row.upset_price, row.winning_bid))
+        finally
+            SQLite.close(dbh)
+        end
     end
     return :ok
 end
@@ -468,29 +479,33 @@ function get_block_and_lot()
         printstyled(@sprintf("%12s block %6d lot %5d address %s\n", row.case_number, row.block, row.lot, row.address), color=:light_green)
 
         # insert the row into the lots table
-        dbh2 = db()
-        try
-            sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
-            addr = ismissing(row.address) ? nothing : row.address
-            DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
-        finally
-            SQLite.close(dbh2)
+        with_db_write_lock() do
+            dbh2 = db()
+            try
+                sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                addr = ismissing(row.address) ? nothing : row.address
+                DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
+            finally
+                SQLite.close(dbh2)
+            end
         end
 
         if !ismissing(values.judgement)
-            dbh3 = db()
-            try
-                exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
-                has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(row.auction_date))) |> DataFrame)
-                if has_row
-                    update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
-                    DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(row.auction_date)))
-                else
-                    insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
-                    DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(row.auction_date), values.judgement, nothing, nothing))
+            with_db_write_lock() do
+                dbh3 = db()
+                try
+                    exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
+                    has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(row.auction_date))) |> DataFrame)
+                    if has_row
+                        update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
+                        DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(row.auction_date)))
+                    else
+                        insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
+                        DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(row.auction_date), values.judgement, nothing, nothing))
+                    end
+                finally
+                    SQLite.close(dbh3)
                 end
-            finally
-                SQLite.close(dbh3)
             end
         end
     end
@@ -517,29 +532,33 @@ function extract_notice_of_sale(case_row; interactive=false)
         bbl=missing,
         unit=missing,
     )
-    dbh2 = db()
-    try
-        sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        addr = ismissing(row.address) ? nothing : row.address
-        DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
-    finally
-        SQLite.close(dbh2)
+    with_db_write_lock() do
+        dbh2 = db()
+        try
+            sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            addr = ismissing(row.address) ? nothing : row.address
+            DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
+        finally
+            SQLite.close(dbh2)
+        end
     end
 
     if !ismissing(values.judgement)
-        dbh3 = db()
-        try
-            exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
-            has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(case_row.auction_date))) |> DataFrame)
-            if has_row
-                update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
-                DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(case_row.auction_date)))
-            else
-                insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
-                DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(case_row.auction_date), values.judgement, nothing, nothing))
+        with_db_write_lock() do
+            dbh3 = db()
+            try
+                exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
+                has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(case_row.auction_date))) |> DataFrame)
+                if has_row
+                    update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
+                    DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(case_row.auction_date)))
+                else
+                    insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
+                    DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(case_row.auction_date), values.judgement, nothing, nothing))
+                end
+            finally
+                SQLite.close(dbh3)
             end
-        finally
-            SQLite.close(dbh3)
         end
     end
     return :ok

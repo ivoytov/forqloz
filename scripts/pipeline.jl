@@ -130,7 +130,24 @@ function finish_run(run_id, status)
                 (now_iso(), status, run_id))
             # Browser sql.js reads the main SQLite file only (not WAL sidecars),
             # so checkpoint WAL at run end to persist all staged updates.
-            DBInterface.execute(dbh, "PRAGMA wal_checkpoint(TRUNCATE);")
+            # This can fail when another process has an open read lock; keep run
+            # finalization successful and treat checkpointing as best effort.
+            checkpoint_ok = false
+            for attempt in 1:3
+                try
+                    DBInterface.execute(dbh, "PRAGMA wal_checkpoint(TRUNCATE);")
+                    checkpoint_ok = true
+                    break
+                catch e
+                    if !occursin("locked", lowercase(string(e))) || attempt == 3
+                        break
+                    end
+                    sleep(0.2 * attempt)
+                end
+            end
+            if !checkpoint_ok
+                println("finish_run: WAL checkpoint skipped (database busy/locked)")
+            end
         finally
             SQLite.close(dbh)
         end
