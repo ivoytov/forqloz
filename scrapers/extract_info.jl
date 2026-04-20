@@ -122,6 +122,18 @@ function detect_time_share(text)
     return extract_pattern(text, patterns)
 end
 
+function detect_sale_cancellation(text)
+    patterns = [
+        r"\bnotice of cancellation\b"i,
+        r"\bcancellation of sale\b"i,
+        r"\bsale (?:is|has been)?\s*cancell?ed\b"i,
+        r"\bforeclosure sale (?:is|has been)?\s*cancell?ed\b"i,
+        r"\bpostponed\b"i,
+        r"\badjourned\b"i,
+    ]
+    return extract_pattern(text, patterns)
+end
+
 # Extract text from PDF
 function extract_text_from_pdf(pdf_path)
     case_number = basename(pdf_path)[1:end-4]
@@ -384,6 +396,10 @@ function parse_notice_of_sale(pdf_path; prompt_prefix=nothing, interactive=is_in
         return nothing
     end
     text = replace(text, "\n" => " ")
+    if !isnothing(detect_sale_cancellation(text))
+        println("Detected cancellation/postponement notice in $pdf_path")
+        return :cancelled
+    end
     judgement = extract_judgement_amount(text)
 
     if !isnothing(detect_time_share(text))
@@ -463,6 +479,9 @@ function get_block_and_lot()
         pdf_path = notice_of_sale_path(case.case_number, case.auction_date)
         case_label = "[Case $(replace(case.case_number, "/" => "-"))]"
         values = parse_notice_of_sale(pdf_path; prompt_prefix=case_label)
+        if values == :cancelled
+            continue
+        end
         if isnothing(values)
             continue
         end
@@ -519,6 +538,9 @@ function extract_notice_of_sale(case_row; interactive=false)
     pdf_path = notice_of_sale_path(case_row.case_number, case_row.auction_date)
     case_label = "[Case $(replace(case_row.case_number, "/" => "-"))]"
     values = parse_notice_of_sale(pdf_path; prompt_prefix=case_label, interactive=interactive)
+    if values == :cancelled
+        return :cancelled
+    end
     if isnothing(values)
         return :missing
     end

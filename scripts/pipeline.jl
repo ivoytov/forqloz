@@ -550,6 +550,10 @@ function extract_nos()
                     record_extraction(row.case_number, "nos"; payload=Dict("status" => "ok"))
                     update_job_status(row.id, "done")
                     println("extract-nos: done $(row.case_number)")
+                elseif res == :cancelled
+                    record_extraction(row.case_number, "nos"; payload=Dict("status" => "cancelled"))
+                    update_job_status(row.id, "done"; last_error="sale cancelled/postponed notice")
+                    println("extract-nos: cancelled/postponed notice $(row.case_number)")
                 else
                     ensure_review(row.case_number, "nos", "missing block/lot"; payload=Dict("case_number" => row.case_number))
                     update_job_status(row.id, "review"; last_error="missing block/lot")

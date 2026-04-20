@@ -170,7 +170,9 @@ build_download_jobs() = get_data()
 function run_download_job(case_number, borough, auction_date, missing_filings)
     ad_str = auction_date === missing ? "" : Dates.format(auction_date, dateformat"yyyy-mm-dd")
     args = [case_number, borough, ad_str, missing_filings...]
-    run(pipeline(ignorestatus(`node scrapers/notice_of_sale.js $args`), stdout, stderr), wait=true)
+    # Propagate non-zero exits (e.g., captcha timeout) so the pipeline retries
+    # instead of treating the case as successfully checked.
+    run(pipeline(`node scrapers/notice_of_sale.js $args`, stdout, stderr), wait=true)
 end
 
 function resume_from_case(rows::DataFrame, resume_case)
