@@ -257,7 +257,7 @@ function retry_at(attempts)
     return Dates.format(now() + Minute(minutes), dateformat"yyyy-mm-ddTHH:MM:SS")
 end
 
-const SURPLUS_SCHEDULE_DAYS = [1, 2, 4, 7, 14, 28]
+const SURPLUS_SCHEDULE_DAYS = [1, 2, 4, 7, 14, 21]
 
 function next_surplus_attempt(auction_date)
     auction_date === missing && return nothing
