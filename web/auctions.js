@@ -263,7 +263,13 @@ const columnDefs = [
         headerName: "BBL",
         type: "rightAligned",
         valueGetter: p => `${p.data.block}-${p.data.lot}`,
-        cellRenderer: (p) => `<a href="${propertyInfoMapUrl(p.data.BBL, p.data.lot)}" target="_blank">` + p.value + `</a>`,
+        cellRenderer: (p) => {
+            const borough = String(p.data.borough_id ?? "");
+            const block = String(p.data.block ?? "").padStart(5, "0");
+            const lot = String(p.data.lot ?? "").padStart(4, "0");
+            const bbl = borough + block + lot;
+            return `<a href="${propertyInfoMapUrl(bbl, p.data.lot)}" target="_blank">` + p.value + `</a>`;
+        },
         minWidth: 120,
     },
     {
