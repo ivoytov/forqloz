@@ -785,6 +785,7 @@ function run_pipeline()
     try
         sync_calendar(run_id)
         sync_filings(run_id)
+        enqueue_missing_jobs(run_id)
         extract_nos()
         extract_bids_stage()
         enrich_pluto_stage()
