@@ -6,7 +6,7 @@ const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "forecl
 function db()
     conn = SQLite.DB(DB_PATH)
     DBInterface.execute(conn, "PRAGMA journal_mode=WAL;")
-    DBInterface.execute(conn, "PRAGMA busy_timeout=5000;")
+    DBInterface.execute(conn, "PRAGMA busy_timeout=30000;")
     return conn
 end
 
@@ -501,7 +501,12 @@ function get_block_and_lot()
         with_db_write_lock() do
             dbh2 = db()
             try
-                sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                sql = """
+                    INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(case_number, borough, block, lot)
+                    DO UPDATE SET address = COALESCE(excluded.address, lots.address)
+                """
                 addr = ismissing(row.address) ? nothing : row.address
                 DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
             finally
@@ -557,7 +562,12 @@ function extract_notice_of_sale(case_row; interactive=false)
     with_db_write_lock() do
         dbh2 = db()
         try
-            sql = "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            sql = """
+                INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(case_number, borough, block, lot)
+                DO UPDATE SET address = COALESCE(excluded.address, lots.address)
+            """
             addr = ismissing(row.address) ? nothing : row.address
             DBInterface.execute(dbh2, sql, (row.case_number, row.borough, row.block, row.lot, addr, nothing, nothing))
         finally
