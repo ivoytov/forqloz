@@ -16,7 +16,7 @@ include(joinpath(ROOT, "process_auctions.jl"))
 function db()
     conn = SQLite.DB(DB_PATH)
     DBInterface.execute(conn, "PRAGMA journal_mode=WAL;")
-    DBInterface.execute(conn, "PRAGMA busy_timeout=5000;")
+    DBInterface.execute(conn, "PRAGMA busy_timeout=30000;")
     return conn
 end
 
@@ -725,7 +725,12 @@ function review_next()
             end
             borough = case_row[1, :borough]
             DBInterface.execute(dbh2,
-                "INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(case_number, borough, block, lot)
+                DO UPDATE SET address = COALESCE(excluded.address, lots.address)
+                """,
                 (case_number, borough, parse(Int, block), parse(Int, lot), isempty(address) ? nothing : address, nothing, nothing))
             DBInterface.execute(dbh2, "UPDATE reviews SET status = 'done', updated_at = ? WHERE id = ?", (now_iso(), rid))
         finally
