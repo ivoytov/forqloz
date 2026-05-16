@@ -142,14 +142,14 @@ function extract_text_from_pdf(pdf_path)
 
     # Call the GraphicsMagick command
     try
-        run(pipeline(`gm convert -append -density 330 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
+        run(pipeline(`gm convert -append -density 150 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
     catch e
         println("Error running gm convert: $e")
         return :gm_failed
     end
 
     
-    run_tesseract(image_path, text_path, lang="eng", user_defined_dpi=330)
+    run_tesseract(image_path, text_path, lang="eng", user_defined_dpi=150)
     text = read(text_path, String)
     rm(image_path)
     rm(text_path)
@@ -162,7 +162,7 @@ function llm_extract_values(pdf_path)
 
     # Call the GraphicsMagick command
     try
-        run(pipeline(`gm convert -append -density 330 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
+        run(pipeline(`gm convert -append -density 150 $pdf_path $image_path`, stdout=devnull, stderr=devnull))
     catch e
         println("Error running gm convert: $e")
         return :gm_failed
@@ -173,14 +173,20 @@ function llm_extract_values(pdf_path)
     rm(image_path)
     base64_image = base64encode(image_data)
     
+    if !haskey(ENV, "FORQLOZ_OPENROUTER_API_KEY") || isempty(strip(ENV["FORQLOZ_OPENROUTER_API_KEY"]))
+        error("FORQLOZ_OPENROUTER_API_KEY is required")
+    end
     provider = OpenAI.OpenAIProvider(
-        api_key=ENV["OPENAI_API_KEY"],
+        api_key=ENV["FORQLOZ_OPENROUTER_API_KEY"],
+        base_url=get(ENV, "FORQLOZ_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     )
 
-    
+    # Cheap default vision-capable OpenRouter model; override via env if needed.
+    model_id = get(ENV, "FORQLOZ_OPENROUTER_MODEL", "openai/gpt-5-mini")
+
     r = create_chat(
         provider,
-        "gpt-5-mini",
+        model_id,
         [Dict("role" => "user", "content" => [
             Dict("type" => "text", "text" => "Extracting the amount of final judgement of foreclosure, upset price, and the sale price of property (winning bid) from this document. If the purchaser is specified as Plaintiff, then return the sale price as \$100 exactly (even if a different amount is listed on the form). Return the answer in JSON format like this: { \"judgement\": 100000, \"upset_price\": 200000, \"winning_bid\": 300000 }"),
             Dict("type" => "image_url", "image_url" => Dict("url" => "data:image/png;base64," * base64_image))
