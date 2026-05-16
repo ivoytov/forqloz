@@ -172,17 +172,17 @@ function llm_extract_values(pdf_path)
     image_data = read(image_path)
     rm(image_path)
     base64_image = base64encode(image_data)
-    
-    if !haskey(ENV, "FORQLOZ_OPENROUTER_API_KEY") || isempty(strip(ENV["FORQLOZ_OPENROUTER_API_KEY"]))
-        error("FORQLOZ_OPENROUTER_API_KEY is required")
+
+    if !haskey(ENV, "OPENROUTER_API_KEY") || isempty(strip(ENV["OPENROUTER_API_KEY"]))
+        error("OPENROUTER_API_KEY is required")
     end
     provider = OpenAI.OpenAIProvider(
-        api_key=ENV["FORQLOZ_OPENROUTER_API_KEY"],
-        base_url=get(ENV, "FORQLOZ_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        api_key=ENV["OPENROUTER_API_KEY"],
+        base_url=get(ENV, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
     )
 
     # Cheap default vision-capable OpenRouter model; override via env if needed.
-    model_id = get(ENV, "FORQLOZ_OPENROUTER_MODEL", "openai/gpt-5-mini")
+    model_id = get(ENV, "OPENROUTER_MODEL", "openai/gpt-5-mini")
 
     r = create_chat(
         provider,
