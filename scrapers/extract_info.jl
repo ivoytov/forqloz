@@ -5,7 +5,6 @@ DotEnv.load!()
 const DB_PATH = normpath(joinpath(@__DIR__, "..", "web", "foreclosures", "foreclosures.sqlite"))
 function db()
     conn = SQLite.DB(DB_PATH)
-    DBInterface.execute(conn, "PRAGMA journal_mode=WAL;")
     DBInterface.execute(conn, "PRAGMA busy_timeout=30000;")
     return conn
 end
@@ -17,6 +16,18 @@ function with_db_write_lock(f::Function)
         end
     end
     return f()
+end
+
+function upsert_bid(dbh, case_number, borough, auction_date, judgement, upset_price, winning_bid)
+    DBInterface.execute(dbh, """
+        INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(case_number, borough, auction_date)
+        DO UPDATE SET
+            judgement = COALESCE(excluded.judgement, bids.judgement),
+            upset_price = COALESCE(excluded.upset_price, bids.upset_price),
+            winning_bid = COALESCE(excluded.winning_bid, bids.winning_bid)
+    """, (case_number, borough, string(auction_date), judgement, upset_price, winning_bid))
 end
 
 function is_interactive()
@@ -182,7 +193,7 @@ function llm_extract_values(pdf_path)
     )
 
     # Cheap default vision-capable OpenRouter model; override via env if needed.
-    model_id = get(ENV, "OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+    model_id = get(ENV, "OPENROUTER_MODEL", "openai/gpt-5-mini")
 
     r = create_chat(
         provider,
@@ -240,8 +251,7 @@ function prompt_for_winning_bid(foreclosure_case; llm_values=nothing, interactiv
     with_db_write_lock() do
         dbh = db()
         try
-            sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
-            DBInterface.execute(dbh, sql, (row.case_number, row.borough, string(row.auction_date), row.judgement, row.upset_price, row.winning_bid))
+            upsert_bid(dbh, row.case_number, row.borough, row.auction_date, row.judgement, row.upset_price, row.winning_bid)
         finally
             SQLite.close(dbh)
         end
@@ -524,15 +534,7 @@ function get_block_and_lot()
             with_db_write_lock() do
                 dbh3 = db()
                 try
-                    exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
-                    has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(row.auction_date))) |> DataFrame)
-                    if has_row
-                        update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
-                        DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(row.auction_date)))
-                    else
-                        insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
-                        DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(row.auction_date), values.judgement, nothing, nothing))
-                    end
+                    upsert_bid(dbh3, row.case_number, row.borough, foreclosure_case.auction_date, values.judgement, nothing, nothing)
                 finally
                     SQLite.close(dbh3)
                 end
@@ -585,15 +587,7 @@ function extract_notice_of_sale(case_row; interactive=false)
         with_db_write_lock() do
             dbh3 = db()
             try
-                exists_sql = "SELECT 1 FROM bids WHERE case_number = ? AND borough = ? AND auction_date = ? LIMIT 1"
-                has_row = !isempty(DBInterface.execute(dbh3, exists_sql, (row.case_number, row.borough, string(case_row.auction_date))) |> DataFrame)
-                if has_row
-                    update_sql = "UPDATE bids SET judgement = ? WHERE case_number = ? AND borough = ? AND auction_date = ?"
-                    DBInterface.execute(dbh3, update_sql, (values.judgement, row.case_number, row.borough, string(case_row.auction_date)))
-                else
-                    insert_sql = "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)"
-                    DBInterface.execute(dbh3, insert_sql, (row.case_number, row.borough, string(case_row.auction_date), values.judgement, nothing, nothing))
-                end
+                upsert_bid(dbh3, row.case_number, row.borough, case_row.auction_date, values.judgement, nothing, nothing)
             finally
                 SQLite.close(dbh3)
             end
@@ -624,7 +618,7 @@ end
 
 # Main function
 function main()
-    get_block_and_lot()
+    # get_block_and_lot()
     if is_interactive() || "--no-interaction" ∈ ARGS
         get_auction_results()
     end

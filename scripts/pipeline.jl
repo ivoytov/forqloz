@@ -15,9 +15,20 @@ include(joinpath(ROOT, "process_auctions.jl"))
 
 function db()
     conn = SQLite.DB(DB_PATH)
-    DBInterface.execute(conn, "PRAGMA journal_mode=WAL;")
     DBInterface.execute(conn, "PRAGMA busy_timeout=30000;")
     return conn
+end
+
+function configure_db!()
+    lock(DB_WRITE_LOCK) do
+        dbh = SQLite.DB(DB_PATH)
+        try
+            DBInterface.execute(dbh, "PRAGMA journal_mode=WAL;")
+            DBInterface.execute(dbh, "PRAGMA busy_timeout=30000;")
+        finally
+            SQLite.close(dbh)
+        end
+    end
 end
 
 now_iso() = Dates.format(now(), dateformat"yyyy-mm-ddTHH:MM:SS")
@@ -27,6 +38,16 @@ function migrate_schema()
     lock(DB_WRITE_LOCK) do
         dbh = db()
         try
+            DBInterface.execute(dbh, """
+                CREATE TABLE IF NOT EXISTS bids (
+                    case_number TEXT,
+                    borough TEXT,
+                    auction_date TEXT,
+                    judgement REAL,
+                    upset_price REAL,
+                    winning_bid REAL
+                );
+            """)
             DBInterface.execute(dbh, """
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY,
@@ -95,10 +116,64 @@ function migrate_schema()
                 );
             """)
 
+            # Normalize historical duplicates before enforcing the unique bid key.
+            DBInterface.execute(dbh, """
+                UPDATE bids
+                SET judgement = COALESCE(
+                        judgement,
+                        (
+                            SELECT source.judgement
+                            FROM bids AS source
+                            WHERE source.case_number = bids.case_number
+                              AND source.borough = bids.borough
+                              AND source.auction_date = bids.auction_date
+                              AND source.judgement IS NOT NULL
+                            ORDER BY source.rowid DESC
+                            LIMIT 1
+                        )
+                    ),
+                    upset_price = COALESCE(
+                        upset_price,
+                        (
+                            SELECT source.upset_price
+                            FROM bids AS source
+                            WHERE source.case_number = bids.case_number
+                              AND source.borough = bids.borough
+                              AND source.auction_date = bids.auction_date
+                              AND source.upset_price IS NOT NULL
+                            ORDER BY source.rowid DESC
+                            LIMIT 1
+                        )
+                    ),
+                    winning_bid = COALESCE(
+                        winning_bid,
+                        (
+                            SELECT source.winning_bid
+                            FROM bids AS source
+                            WHERE source.case_number = bids.case_number
+                              AND source.borough = bids.borough
+                              AND source.auction_date = bids.auction_date
+                              AND source.winning_bid IS NOT NULL
+                            ORDER BY source.rowid DESC
+                            LIMIT 1
+                        )
+                    );
+            """)
+            DBInterface.execute(dbh, """
+                DELETE FROM bids
+                WHERE rowid NOT IN (
+                    SELECT MAX(rowid)
+                    FROM bids
+                    GROUP BY case_number, borough, auction_date
+                );
+            """)
+            DBInterface.execute(dbh, "DROP INDEX IF EXISTS idx_bids_key")
+
             DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(type, status, next_attempt_at)")
             DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_files_case ON files(case_number, doc_type, auction_date)")
             DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_extractions_case ON extractions(case_number, type)")
             DBInterface.execute(dbh, "CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status, type)")
+            DBInterface.execute(dbh, "CREATE UNIQUE INDEX IF NOT EXISTS uq_bids_case_boro_auction_date ON bids(case_number, borough, auction_date)")
         finally
             SQLite.close(dbh)
         end
@@ -467,13 +542,15 @@ function sync_filings(run_id=nothing)
         end
 
         if case_number in discontinued_cases()
-            dbh = db()
-            try
-                DBInterface.execute(dbh,
-                    "INSERT OR REPLACE INTO case_status (case_number, status, reason, updated_at) VALUES (?, ?, ?, ?)",
-                    (case_number, "discontinued", "case log", now_iso()))
-            finally
-                SQLite.close(dbh)
+            lock(DB_WRITE_LOCK) do
+                dbh = db()
+                try
+                    DBInterface.execute(dbh,
+                        "INSERT OR REPLACE INTO case_status (case_number, status, reason, updated_at) VALUES (?, ?, ?, ?)",
+                        (case_number, "discontinued", "case log", now_iso()))
+                finally
+                    SQLite.close(dbh)
+                end
             end
             update_job_status(row.id, "done")
             continue
@@ -716,25 +793,32 @@ function review_next()
             println("Missing block/lot; review not resolved.")
             return
         end
-        dbh2 = db()
-        try
-            case_row = DataFrame(DBInterface.execute(dbh2, "SELECT case_number, borough FROM cases WHERE case_number = ? LIMIT 1", (case_number,)))
-            if nrow(case_row) == 0
-                println("Case not found; review not resolved.")
-                return
+        resolved = false
+        lock(DB_WRITE_LOCK) do
+            dbh2 = db()
+            try
+                case_row = DataFrame(DBInterface.execute(dbh2, "SELECT case_number, borough FROM cases WHERE case_number = ? LIMIT 1", (case_number,)))
+                if nrow(case_row) == 0
+                    return
+                end
+                borough = case_row[1, :borough]
+                DBInterface.execute(dbh2,
+                    """
+                    INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(case_number, borough, block, lot)
+                    DO UPDATE SET address = COALESCE(excluded.address, lots.address)
+                    """,
+                    (case_number, borough, parse(Int, block), parse(Int, lot), isempty(address) ? nothing : address, nothing, nothing))
+                DBInterface.execute(dbh2, "UPDATE reviews SET status = 'done', updated_at = ? WHERE id = ?", (now_iso(), rid))
+                resolved = true
+            finally
+                SQLite.close(dbh2)
             end
-            borough = case_row[1, :borough]
-            DBInterface.execute(dbh2,
-                """
-                INSERT INTO lots (case_number, borough, block, lot, address, BBL, unit)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(case_number, borough, block, lot)
-                DO UPDATE SET address = COALESCE(excluded.address, lots.address)
-                """,
-                (case_number, borough, parse(Int, block), parse(Int, lot), isempty(address) ? nothing : address, nothing, nothing))
-            DBInterface.execute(dbh2, "UPDATE reviews SET status = 'done', updated_at = ? WHERE id = ?", (now_iso(), rid))
-        finally
-            SQLite.close(dbh2)
+        end
+        if !resolved
+            println("Case not found; review not resolved.")
+            return
         end
         println("Review resolved for $case_number (nos).")
     elseif type == "bids"
@@ -751,21 +835,36 @@ function review_next()
             println("Missing values; review not resolved.")
             return
         end
-        dbh2 = db()
-        try
-            case_row = DataFrame(DBInterface.execute(dbh2, "SELECT case_number, borough, auction_date FROM cases WHERE case_number = ? LIMIT 1", (case_number,)))
-            if nrow(case_row) == 0
-                println("Case not found; review not resolved.")
-                return
+        resolved = false
+        lock(DB_WRITE_LOCK) do
+            dbh2 = db()
+            try
+                case_row = DataFrame(DBInterface.execute(dbh2, "SELECT case_number, borough, auction_date FROM cases WHERE case_number = ? LIMIT 1", (case_number,)))
+                if nrow(case_row) == 0
+                    return
+                end
+                borough = case_row[1, :borough]
+                auction_date = case_row[1, :auction_date]
+                DBInterface.execute(dbh2,
+                    """
+                    INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(case_number, borough, auction_date)
+                    DO UPDATE SET
+                        judgement = excluded.judgement,
+                        upset_price = excluded.upset_price,
+                        winning_bid = excluded.winning_bid
+                    """,
+                    (case_number, borough, auction_date, parse(Float64, judgement), parse(Float64, upset_price), parse(Float64, winning_bid)))
+                DBInterface.execute(dbh2, "UPDATE reviews SET status = 'done', updated_at = ? WHERE id = ?", (now_iso(), rid))
+                resolved = true
+            finally
+                SQLite.close(dbh2)
             end
-            borough = case_row[1, :borough]
-            auction_date = case_row[1, :auction_date]
-            DBInterface.execute(dbh2,
-                "INSERT INTO bids (case_number, borough, auction_date, judgement, upset_price, winning_bid) VALUES (?, ?, ?, ?, ?, ?)",
-                (case_number, borough, auction_date, parse(Float64, judgement), parse(Float64, upset_price), parse(Float64, winning_bid)))
-            DBInterface.execute(dbh2, "UPDATE reviews SET status = 'done', updated_at = ? WHERE id = ?", (now_iso(), rid))
-        finally
-            SQLite.close(dbh2)
+        end
+        if !resolved
+            println("Case not found; review not resolved.")
+            return
         end
         println("Review resolved for $case_number (bids).")
     else
@@ -774,16 +873,19 @@ function review_next()
 end
 
 function review_resolve(case_number, type)
-    dbh = db()
-    try
-        DBInterface.execute(dbh, "UPDATE reviews SET status = 'done', updated_at = ? WHERE case_number = ? AND type = ? AND status = 'pending'",
-            (now_iso(), case_number, type))
-    finally
-        SQLite.close(dbh)
+    lock(DB_WRITE_LOCK) do
+        dbh = db()
+        try
+            DBInterface.execute(dbh, "UPDATE reviews SET status = 'done', updated_at = ? WHERE case_number = ? AND type = ? AND status = 'pending'",
+                (now_iso(), case_number, type))
+        finally
+            SQLite.close(dbh)
+        end
     end
 end
 
 function run_pipeline()
+    configure_db!()
     migrate_schema()
     run_id = start_run()
     status = "done"
@@ -805,6 +907,7 @@ function run_pipeline()
 end
 
 function run_with_run(fn)
+    configure_db!()
     run_id = start_run()
     status = "done"
     try
@@ -822,6 +925,7 @@ function main()
         println("Usage: julia --project=. scripts/pipeline.jl <command>")
         return
     end
+    configure_db!()
     cmd = ARGS[1]
     migrate_schema()
     if cmd == "run"
