@@ -7,6 +7,74 @@ function sleep(s) {
     return new Promise(resolve => setTimeout(resolve, s * 1000));
 }
 
+async function waitForAnyKey(message) {
+    if (!process.stdin.isTTY) {
+        console.warn('stdin is not a TTY; cannot pause for manual captcha solve');
+        return;
+    }
+
+    console.log(message);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+
+    const previousRawMode = process.stdin.isRaw;
+    if (typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(true);
+    }
+
+    await new Promise((resolve) => {
+        const onData = (chunk) => {
+            process.stdin.off('data', onData);
+            if (chunk === '\u0003') {
+                if (typeof process.stdin.setRawMode === 'function') {
+                    process.stdin.setRawMode(Boolean(previousRawMode));
+                }
+                process.stdin.pause();
+                process.kill(process.pid, 'SIGINT');
+                return;
+            }
+            resolve();
+        };
+        process.stdin.on('data', onData);
+    });
+
+    if (typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(Boolean(previousRawMode));
+    }
+    process.stdin.pause();
+    console.log('Continuing...');
+}
+
+async function getCalendarGateState(page) {
+    return page.evaluate(() => {
+        const bodyText = document.body.innerText.toLowerCase();
+        const includesAny = (phrases) => phrases.some((phrase) => bodyText.includes(phrase));
+
+        return {
+            hasCaptcha: includesAny([
+                'having captcha trouble?',
+                'verify you are human',
+                'security check',
+                'please complete the security check',
+                'press and hold',
+            ]),
+            hasResults: !!document.querySelector('input#btnApply') || !!document.querySelector('dt'),
+        };
+    });
+}
+
+async function waitForCalendarGateState(page, timeoutSeconds = 10) {
+    const startedAt = Date.now();
+    while ((Date.now() - startedAt) < timeoutSeconds * 1000) {
+        const state = await getCalendarGateState(page);
+        if (state.hasResults || state.hasCaptcha) {
+            return state;
+        }
+        await sleep(1);
+    }
+    return getCalendarGateState(page);
+}
+
 const endpoint = 'http://localhost:9222';
 
 console.log('Connecting to Scraping Browser...');
@@ -109,9 +177,9 @@ async function getAuctionLots(page, borough, { courtId, calendarId }, maxDate) {
         page.waitForNavigation({ waitUntil: 'networkidle2' }),
         page.locator("input#btnFindCalendar").click(),
     ])
-    if (courtId == boroughConfigDict['Queens'].courtId) {
-        console.log("Waiting for captcha")
-        await sleep(10)
+    const gateState = await waitForCalendarGateState(page);
+    if (gateState.hasCaptcha) {
+        await waitForAnyKey(`Solve captcha/calendar page for ${borough}, then press any key to continue.`);
     }
     
 
