@@ -303,6 +303,59 @@ function reclaim_run_jobs(run_id, type)
     end
 end
 
+function reclaim_stale_jobs(type; statuses=["running"])
+    isempty(statuses) && return
+    lock(DB_WRITE_LOCK) do
+        dbh = db()
+        try
+            status_list = join(["'$(s)'" for s in statuses], ",")
+            DBInterface.execute(dbh,
+                """
+                UPDATE jobs
+                SET status = 'pending',
+                    next_attempt_at = NULL,
+                    updated_at = ?
+                WHERE type = ?
+                  AND status IN ($status_list)
+                """,
+                (now_iso(), type))
+        finally
+            SQLite.close(dbh)
+        end
+    end
+end
+
+function requeue_retry_jobs_with_error(type, patterns::Vector{String})
+    isempty(patterns) && return
+    lock(DB_WRITE_LOCK) do
+        dbh = db()
+        try
+            where_sql = join(["instr(COALESCE(last_error, ''), ?) > 0" for _ in patterns], " OR ")
+            params = Any[now_iso(), type]
+            append!(params, patterns)
+            DBInterface.execute(dbh,
+                """
+                UPDATE jobs
+                SET status = 'pending',
+                    next_attempt_at = NULL,
+                    updated_at = ?
+                WHERE type = ?
+                  AND status = 'retry'
+                  AND ($where_sql)
+                """,
+                Tuple(params))
+        finally
+            SQLite.close(dbh)
+        end
+    end
+end
+
+function require_openrouter_api_key!()
+    if !haskey(ENV, "OPENROUTER_API_KEY") || isempty(strip(ENV["OPENROUTER_API_KEY"]))
+        error("OPENROUTER_API_KEY is required for extract-bids")
+    end
+end
+
 function update_job_status(job_id, status; last_error=nothing, next_attempt_at=nothing)
     lock(DB_WRITE_LOCK) do
         dbh = db()
@@ -663,6 +716,9 @@ end
 
 function extract_bids_stage()
     println("Stage: extract-bids")
+    reclaim_stale_jobs("extract_bids"; statuses=["running"])
+    requeue_retry_jobs_with_error("extract_bids", ["OPENROUTER_API_KEY is required"])
+    require_openrouter_api_key!()
     jobs = list_jobs("extract_bids")
     if nrow(jobs) == 0
         println("No extract_bids jobs pending.")

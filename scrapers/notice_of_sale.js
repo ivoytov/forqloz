@@ -26,6 +26,80 @@ function sleep(s) {
     return new Promise(resolve => setTimeout(resolve, s * 1000));
 }
 
+async function waitForAnyKey(message) {
+    if (!process.stdin.isTTY) {
+        console.warn('stdin is not a TTY; cannot pause for manual captcha solve');
+        return;
+    }
+
+    console.log(message);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+
+    const previousRawMode = process.stdin.isRaw;
+    if (typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(true);
+    }
+
+    await new Promise((resolve) => {
+        const onData = (chunk) => {
+            process.stdin.off('data', onData);
+            if (chunk === '\u0003') {
+                if (typeof process.stdin.setRawMode === 'function') {
+                    process.stdin.setRawMode(Boolean(previousRawMode));
+                }
+                process.stdin.pause();
+                process.kill(process.pid, 'SIGINT');
+                return;
+            }
+            resolve();
+        };
+        process.stdin.on('data', onData);
+    });
+
+    if (typeof process.stdin.setRawMode === 'function') {
+        process.stdin.setRawMode(Boolean(previousRawMode));
+    }
+    process.stdin.pause();
+    console.log('Continuing...');
+}
+
+async function getSearchGateState(page) {
+    return page.evaluate(() => {
+        const bodyText = document.body.innerText.toLowerCase();
+        const includesAny = (phrases) => phrases.some((phrase) => bodyText.includes(phrase));
+
+        return {
+            hasCaptcha: includesAny([
+                'having captcha trouble?',
+                'verify you are human',
+                'security check',
+                'please complete the security check',
+                'press and hold',
+            ]),
+            hasResultsTable: !!document.querySelector('table.NewSearchResults'),
+            hasNoResults: includesAny([
+                'no cases were found',
+                'search returned no results',
+                'no matches were found',
+                'no records found',
+            ]),
+        };
+    });
+}
+
+async function waitForSearchGateState(page, timeoutSeconds = 10) {
+    const startedAt = Date.now();
+    while ((Date.now() - startedAt) < timeoutSeconds * 1000) {
+        const state = await getSearchGateState(page);
+        if (state.hasResultsTable || state.hasNoResults || state.hasCaptcha) {
+            return state;
+        }
+        await sleep(1);
+    }
+    return getSearchGateState(page);
+}
+
 function missing_filings(index_number, auction_date) {
     const out = []
     for (const f in FilingType) {
@@ -81,15 +155,6 @@ export async function download_filing(index_number, county, auction_date, missin
         return result;
     };
     // const client = await page.createCDPSession();
-    await page.setRequestInterception(true);
-
-    page.on('request', (req) => {
-        if (req.resourceType() == 'stylesheet' || req.resourceType() == 'font' || req.resourceType() == 'image') {
-            req.abort();
-        } else {
-            req.continue();
-        }
-    });
 
     try {
         await page.goto(url, { waitUntil: 'networkidle0', timeout: 2 * 60 * 1000 });
@@ -110,24 +175,9 @@ export async function download_filing(index_number, county, auction_date, missin
             }),
         ]);
 
-        // Check for CAPTCHA before proceeding
-        let maxWaitTime = 60; // seconds
-        while (maxWaitTime > 0) {
-            const isCaptcha = await page.evaluate(() => {
-                const bodyText = document.body.innerText.toLowerCase();
-                return bodyText.includes("having captcha trouble?");
-            });
-
-            if (!isCaptcha) break;
-
-            console.log("Captcha detected. Waiting for manual solve...");
-            await sleep(5); // your existing sleep function
-            maxWaitTime -= 5;
-        }
-
-        if (maxWaitTime <= 0) {
-            console.warn(`${index_number} captcha not solved in time`);
-            return finish({ error: "captcha timeout" });
+        const gateState = await waitForSearchGateState(page);
+        if (gateState.hasCaptcha) {
+            await waitForAnyKey(`Solve captcha/search for ${index_number}, then press any key to continue.`);
         }
         const tableExists = await page.$("table.NewSearchResults");
         if (!tableExists) {
