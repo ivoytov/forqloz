@@ -470,6 +470,19 @@ function ensure_review(case_number, type, reason; payload=Dict())
     end
 end
 
+function resolve_pending_review(case_number, type)
+    lock(DB_WRITE_LOCK) do
+        dbh = db()
+        try
+            DBInterface.execute(dbh,
+                "UPDATE reviews SET status = 'done', updated_at = ? WHERE case_number = ? AND type = ? AND status = 'pending'",
+                (now_iso(), case_number, type))
+        finally
+            SQLite.close(dbh)
+        end
+    end
+end
+
 function record_extraction(case_number, type; payload=Dict(), source_file_id=nothing)
     lock(DB_WRITE_LOCK) do
         dbh = db()
@@ -678,10 +691,12 @@ function extract_nos()
                 res = extract_notice_of_sale(case_row; interactive=false)
                 if res == :ok
                     record_extraction(row.case_number, "nos"; payload=Dict("status" => "ok"))
+                    resolve_pending_review(row.case_number, "nos")
                     update_job_status(row.id, "done")
                     println("extract-nos: done $(row.case_number)")
                 elseif res == :cancelled
                     record_extraction(row.case_number, "nos"; payload=Dict("status" => "cancelled"))
+                    resolve_pending_review(row.case_number, "nos")
                     update_job_status(row.id, "done"; last_error="sale cancelled/postponed notice")
                     println("extract-nos: cancelled/postponed notice $(row.case_number)")
                 else
@@ -752,6 +767,7 @@ function extract_bids_stage()
                 res = extract_bids(case_row; use_llm=true, interactive=false)
                 if res == :ok
                     record_extraction(row.case_number, "bids"; payload=Dict("status" => "ok"))
+                    resolve_pending_review(row.case_number, "bids")
                     update_job_status(row.id, "done")
                     println("extract-bids: done $(row.case_number)")
                 else
