@@ -1,4 +1,4 @@
-import { connect } from 'puppeteer-core';
+import { connect, TimeoutError } from 'puppeteer-core';
 import Database from 'bun:sqlite';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -63,16 +63,75 @@ async function getCalendarGateState(page) {
     });
 }
 
+function isTransientNavigationError(error) {
+    if (!error || typeof error.message !== 'string') {
+        return false;
+    }
+
+    return [
+        'Execution context was destroyed',
+        'Cannot find context with specified id',
+        'Cannot find context with id',
+        'Frame was detached',
+        'Navigating frame was detached',
+    ].some((message) => error.message.includes(message));
+}
+
 async function waitForCalendarGateState(page, timeoutSeconds = 10) {
     const startedAt = Date.now();
     while ((Date.now() - startedAt) < timeoutSeconds * 1000) {
-        const state = await getCalendarGateState(page);
-        if (state.hasResults || state.hasCaptcha) {
-            return state;
+        try {
+            const state = await getCalendarGateState(page);
+            if (state.hasResults || state.hasCaptcha) {
+                return state;
+            }
+        } catch (error) {
+            if (!isTransientNavigationError(error)) {
+                throw error;
+            }
         }
         await sleep(1);
     }
-    return getCalendarGateState(page);
+
+    while (true) {
+        try {
+            return await getCalendarGateState(page);
+        } catch (error) {
+            if (!isTransientNavigationError(error)) {
+                throw error;
+            }
+            await sleep(1);
+        }
+    }
+}
+
+async function resolveCalendarGate(page, borough) {
+    let gateState = await waitForCalendarGateState(page);
+
+    while (gateState.hasCaptcha) {
+        await waitForAnyKey(`Solve captcha/calendar page for ${borough}, then press any key to continue.`);
+        gateState = await waitForCalendarGateState(page, 60);
+
+        if (gateState.hasCaptcha) {
+            console.warn(`Captcha still present for ${borough}; waiting for another manual solve.`);
+        }
+    }
+
+    return gateState;
+}
+
+async function clickAndWaitForPossibleNavigation(page, locator, waitUntil = 'networkidle2', timeout = 30_000) {
+    const navigation = page.waitForNavigation({ waitUntil, timeout }).catch((error) => {
+        if (error instanceof TimeoutError) {
+            return null;
+        }
+        throw error;
+    });
+
+    await Promise.all([
+        navigation,
+        locator.click(),
+    ]);
 }
 
 const endpoint = 'http://localhost:9222';
@@ -173,25 +232,16 @@ async function getAuctionLots(page, borough, { courtId, calendarId }, maxDate) {
 
     await page.select('select#cboCourtPart', calendarId); // FORECLOSURE AUCTION PART
 
-    await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2' }),
-        page.locator("input#btnFindCalendar").click(),
-    ])
-    const gateState = await waitForCalendarGateState(page);
-    if (gateState.hasCaptcha) {
-        await waitForAnyKey(`Solve captcha/calendar page for ${borough}, then press any key to continue.`);
-    }
+    await clickAndWaitForPossibleNavigation(page, page.locator("input#btnFindCalendar"));
+    await resolveCalendarGate(page, borough);
     
 
 
     // check if there is an option to select on page
     if (await page.$("input#btnApply")) {
-        page.locator("#showForm > tbody > tr:nth-child(6) > td > input:nth-child(1)").click()
-
-        await Promise.all([
-            page.locator("input#btnApply").click(),
-            page.waitForNavigation({ waitUntil: 'networkidle2' })
-        ])
+        await page.locator("#showForm > tbody > tr:nth-child(6) > td > input:nth-child(1)").click();
+        await clickAndWaitForPossibleNavigation(page, page.locator("input#btnApply"));
+        await resolveCalendarGate(page, borough);
 
     }
 
