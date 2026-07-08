@@ -39,3 +39,6 @@ scrapers/test.js
 HPD_Registration_Open_Data.pdf
 *.csv
 web/foreclosures/pipeline.lock
+web/saledocs/**
+!web/saledocs/
+!web/saledocs/.gitkeep

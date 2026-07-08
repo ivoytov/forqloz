@@ -2,6 +2,12 @@ const minTransactionPrice = 10000
 let markers = {};
 let mapRenderSeq = 0;
 const mapFeatureCache = new Map();
+const appConfig = window.FORQLOZ_CONFIG ?? {};
+const pdfBaseUrl = String(appConfig.pdfBaseUrl ?? "").replace(/\/+$/, "");
+
+function pdfUrl(relPath) {
+    return pdfBaseUrl ? `${pdfBaseUrl}/${relPath}` : `saledocs/${relPath}`;
+}
 
 
 // Use SQLite DB (sql.js) only — no CSV fallback
@@ -235,9 +241,10 @@ const columnDefs = [
         cellRenderer: function (params) {
             const dateStr = params.data.auction_date ? new Date(params.data.auction_date).toISOString().split('T')[0] : null;
             const base = params.value.replace('/', '-')
-            const filename = dateStr
-                ? `saledocs/noticeofsale/${dateStr}/${base}.pdf`
-                : `saledocs/noticeofsale/${base}.pdf`;
+            const relPath = dateStr
+                ? `noticeofsale/${dateStr}/${base}.pdf`
+                : `noticeofsale/${base}.pdf`;
+            const filename = pdfUrl(relPath);
             return `<a href="${filename}" target="_blank">` + params.value + '</a>'
         },
         minWidth: 140,
@@ -284,7 +291,7 @@ const columnDefs = [
         headerName: "Sale Price", field: "winning_bid", type: ["currency", "rightAligned"],
         cellRenderer: function (params) {
             if (params.value || params.value == "") {
-                const filename = 'saledocs/surplusmoney/' + params.data.case_number.replace('/', '-') + '.pdf'
+                const filename = pdfUrl('surplusmoney/' + params.data.case_number.replace('/', '-') + '.pdf')
                 return `<a href="${filename}" target="_blank">` + formattedCurrency.format(params.value) + '</a>'
             }
         },

@@ -7,6 +7,7 @@ using DataFrames
 
 const ROOT = normpath(joinpath(@__DIR__, ".."))
 const DB_PATH = normpath(joinpath(ROOT, "web", "foreclosures", "foreclosures.sqlite"))
+const SALEDOCS_ROOT = normpath(joinpath(ROOT, "web", "saledocs"))
 const DB_WRITE_LOCK = ReentrantLock()
 
 include(joinpath(ROOT, "scrapers", "download_case_filings.jl"))
@@ -32,6 +33,46 @@ function configure_db!()
 end
 
 now_iso() = Dates.format(now(), dateformat"yyyy-mm-ddTHH:MM:SS")
+
+function env_flag(name::AbstractString; default::AbstractString="0")
+    value = lowercase(strip(get(ENV, name, default)))
+    return value in ("1", "true", "yes", "on")
+end
+
+function r2_publish_enabled()
+    return env_flag("PIPELINE_R2_PUBLISH")
+end
+
+function r2_remote_spec()
+    remote_name = strip(get(ENV, "R2_REMOTE_NAME", ""))
+    bucket = strip(get(ENV, "R2_BUCKET", ""))
+    if isempty(remote_name) || isempty(bucket)
+        error("R2 publish requires R2_REMOTE_NAME and R2_BUCKET")
+    end
+    return string(remote_name, ":", bucket)
+end
+
+function publish_saledocs_to_r2(; mode::AbstractString="copy", dry_run::Bool=false, required::Bool=false)
+    if !required && !r2_publish_enabled()
+        println("R2 publish skipped (set PIPELINE_R2_PUBLISH=1 to enable).")
+        return false
+    end
+    if mode != "copy" && mode != "sync"
+        error("Unsupported R2 publish mode: $mode")
+    end
+    if !isdir(SALEDOCS_ROOT)
+        println("R2 publish skipped (missing $SALEDOCS_ROOT).")
+        return false
+    end
+    rclone = Sys.which("rclone")
+    rclone === nothing && error("rclone is required for R2 publishing")
+
+    args = String[mode, SALEDOCS_ROOT, r2_remote_spec(), "--fast-list", "--checksum"]
+    dry_run && push!(args, "--dry-run")
+    println("R2 publish: rclone $(join(args, " "))")
+    run(Cmd([rclone; args]))
+    return true
+end
 
 
 function migrate_schema()
@@ -964,6 +1005,7 @@ function run_pipeline()
     try
         sync_calendar(run_id)
         sync_filings(run_id)
+        publish_saledocs_to_r2()
         enqueue_missing_jobs(run_id)
         extract_nos()
         extract_bids_stage()
@@ -994,11 +1036,12 @@ end
 
 function main()
     if length(ARGS) == 0
-        println("Usage: julia --project=. scripts/pipeline.jl <command>")
+        println("Usage: julia --project=. scripts/pipeline.jl <command> [--dry-run]")
         return
     end
     configure_db!()
     cmd = ARGS[1]
+    dry_run = any(==("--dry-run"), ARGS[2:end])
     migrate_schema()
     if cmd == "run"
         run_pipeline()
@@ -1007,7 +1050,14 @@ function main()
     elseif cmd == "enqueue-missing-jobs"
         run_with_run(enqueue_missing_jobs)
     elseif cmd == "sync-filings"
-        run_with_run(_ -> sync_filings())
+        run_with_run(_ -> begin
+            sync_filings()
+            publish_saledocs_to_r2()
+        end)
+    elseif cmd == "publish-r2"
+        publish_saledocs_to_r2(; mode="copy", dry_run=dry_run, required=true)
+    elseif cmd == "sync-r2"
+        publish_saledocs_to_r2(; mode="sync", dry_run=dry_run, required=true)
     elseif cmd == "extract-nos"
         run_with_run(run_id -> begin
             enqueue_missing_jobs(run_id)
