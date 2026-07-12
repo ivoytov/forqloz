@@ -77,7 +77,7 @@ function isTransientNavigationError(error) {
     ].some((message) => error.message.includes(message));
 }
 
-async function waitForCalendarGateState(page, timeoutSeconds = 10) {
+async function waitForCalendarGateState(page, timeoutSeconds = 30) {
     const startedAt = Date.now();
     while ((Date.now() - startedAt) < timeoutSeconds * 1000) {
         try {
