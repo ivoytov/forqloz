@@ -193,7 +193,7 @@ function llm_extract_values(pdf_path)
     )
 
     # Cheap default vision-capable OpenRouter model; override via env if needed.
-    model_id = get(ENV, "OPENROUTER_MODEL", "openai/gpt-5-mini")
+    model_id = get(ENV, "OPENROUTER_MODEL", "openai/gpt-5.6-luna")
 
     r = create_chat(
         provider,
