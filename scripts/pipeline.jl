@@ -426,7 +426,7 @@ function retry_at(attempts)
     return Dates.format(now() + Minute(minutes), dateformat"yyyy-mm-ddTHH:MM:SS")
 end
 
-const SURPLUS_SCHEDULE_DAYS = [1, 2, 4, 7, 14]
+const SURPLUS_SCHEDULE_DAYS = [1, 2, 4, 7, 14, 30]
 
 function next_surplus_attempt(auction_date)
     auction_date === missing && return nothing
@@ -434,7 +434,10 @@ function next_surplus_attempt(auction_date)
     today_date = Date(now())
     for offset in SURPLUS_SCHEDULE_DAYS
         scheduled = auction_date + Day(offset)
-        if scheduled >= today_date
+        # Once today's scheduled attempt has run, move to the next future date.
+        # Using >= here would schedule the same midnight timestamp repeatedly
+        # when sync-filings is run later on the same day.
+        if scheduled > today_date
             return Dates.format(DateTime(scheduled), dateformat"yyyy-mm-ddTHH:MM:SS")
         end
     end
@@ -997,20 +1000,23 @@ function review_resolve(case_number, type)
     end
 end
 
+function run_post_sync_pipeline(run_id)
+    println("Stage: process")
+    publish_saledocs_to_r2()
+    enqueue_missing_jobs(run_id)
+    extract_nos()
+    extract_bids_stage()
+    enrich_pluto_stage()
+    build_auction_sales_stage()
+end
+
 function run_pipeline()
     configure_db!()
     migrate_schema()
     run_id = start_run()
     status = "done"
     try
-        sync_calendar(run_id)
-        sync_filings(run_id)
-        publish_saledocs_to_r2()
-        enqueue_missing_jobs(run_id)
-        extract_nos()
-        extract_bids_stage()
-        enrich_pluto_stage()
-        build_auction_sales_stage()
+        run_post_sync_pipeline(run_id)
     catch e
         status = "failed"
         println("Pipeline failed: $e")

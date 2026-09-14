@@ -5,6 +5,7 @@ import path from 'path'
 
 const SBR_WS_ENDPOINT = `wss://${process.env.BRIGHTDATA_AUTH}@brd.superproxy.io:9222`;
 const endpoint = process.env.WSS ?? SBR_WS_ENDPOINT;
+const PAGE_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 async function ensureFileHandle(fileName) {
     fileName = fileName ?? "download.pdf";
@@ -19,14 +20,28 @@ async function ensureFileHandle(fileName) {
 async function download_via_page(page, url, fileName) {
     const fileHandle = await ensureFileHandle(fileName);
     try {
-        const bytes = await page.evaluate(async (downloadUrl) => {
-            const res = await fetch(downloadUrl, { credentials: 'include' });
-            if (!res.ok) {
-                throw new Error(`Failed to fetch PDF: ${res.status} ${res.statusText}`);
+        const bytes = await page.evaluate(async (downloadUrl, timeoutMs) => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const res = await fetch(downloadUrl, {
+                    credentials: 'include',
+                    signal: controller.signal,
+                });
+                if (!res.ok) {
+                    throw new Error(`Failed to fetch PDF: ${res.status} ${res.statusText}`);
+                }
+                const buffer = await res.arrayBuffer();
+                return Array.from(new Uint8Array(buffer));
+            } catch (err) {
+                if (err?.name === 'AbortError') {
+                    throw new Error(`Timed out fetching PDF after ${timeoutMs / 1000}s`);
+                }
+                throw err;
+            } finally {
+                clearTimeout(timeout);
             }
-            const buffer = await res.arrayBuffer();
-            return Array.from(new Uint8Array(buffer));
-        }, url);
+        }, url, PAGE_DOWNLOAD_TIMEOUT_MS);
 
         const data = Buffer.from(bytes);
         if (data.length < 1_000) {

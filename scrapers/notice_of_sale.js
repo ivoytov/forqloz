@@ -6,6 +6,9 @@ import { existsSync, appendFile } from 'fs';
 
 const LOCAL_CHROME_URL = "http://localhost:9222";
 const url = "https://iapps.courts.state.ny.us/nyscef/CaseSearch"
+const BLOCKED_RESOURCE_TYPES = new Set();
+const DOM_TIMEOUT = 15_000;
+const NAVIGATION_TIMEOUT = 15_000;
 
 
 const county_map = {
@@ -24,6 +27,56 @@ export const FilingType = Object.freeze({
 
 function sleep(s) {
     return new Promise(resolve => setTimeout(resolve, s * 1000));
+}
+
+class CloudflareBlockError extends Error {
+    constructor() {
+        super('Cloudflare bot blocker detected; terminating scraper');
+        this.name = 'CloudflareBlockError';
+    }
+}
+
+async function waitForDomNavigation(page, timeout = NAVIGATION_TIMEOUT) {
+    try {
+        await page.waitForNavigation({
+            waitUntil: 'domcontentloaded',
+            timeout,
+        });
+        return true;
+    } catch (err) {
+        if (err instanceof TimeoutError) {
+            return false;
+        }
+        throw err;
+    }
+}
+
+async function throwIfCloudflareBlocked(page) {
+    const blocked = await page.evaluate(() => {
+        const title = document.title.toLowerCase();
+        const text = (document.body?.innerText || '').toLowerCase();
+        const hasCloudflareMarker = title.includes('cloudflare') || text.includes('cloudflare');
+        const hardBlock = [
+            'sorry, you have been blocked',
+            'you are unable to access',
+            'error 1012',
+            'error 1015',
+            'you are being rate limited',
+        ].some(phrase => text.includes(phrase));
+        const challenge = [
+            'just a moment',
+            'attention required',
+            'verify you are human',
+            'checking your browser',
+            'performing security verification',
+        ].some(phrase => title.includes(phrase) || text.includes(phrase));
+
+        return hardBlock || (hasCloudflareMarker && challenge);
+    });
+
+    if (blocked) {
+        throw new CloudflareBlockError();
+    }
 }
 
 async function waitForAnyKey(message) {
@@ -91,6 +144,7 @@ async function getSearchGateState(page) {
 async function waitForSearchGateState(page, timeoutSeconds = 10) {
     const startedAt = Date.now();
     while ((Date.now() - startedAt) < timeoutSeconds * 1000) {
+        await throwIfCloudflareBlocked(page);
         const state = await getSearchGateState(page);
         if (state.hasResultsTable || state.hasNoResults || state.hasCaptcha) {
             return state;
@@ -130,7 +184,15 @@ export async function download_filing(index_number, county, auction_date, missin
     const page = pages[0] ?? await browser.newPage();
     const reusedExistingPage = pages.length > 0;
     page.setDefaultNavigationTimeout(60_000);
-    page.setDefaultTimeout(60_000);
+    page.setDefaultTimeout(DOM_TIMEOUT);
+    await page.setRequestInterception(true);
+    page.on('request', request => {
+        const requestUrl = request.url();
+        const isFavicon = /favicon/i.test(requestUrl);
+        const shouldBlock = isFavicon || BLOCKED_RESOURCE_TYPES.has(request.resourceType());
+        const action = shouldBlock ? request.abort() : request.continue();
+        action.catch(() => {});
+    });
 
     let cleanedUp = false;
     const cleanup = async () => {
@@ -157,7 +219,11 @@ export async function download_filing(index_number, county, auction_date, missin
     // const client = await page.createCDPSession();
 
     try {
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: 2 * 60 * 1000 });
+        // The court site can leave its favicon request open for tens of seconds.
+        // The page is usable once its DOM is loaded; waiting for zero network
+        // connections makes every navigation pay for that unrelated request.
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT });
+        await throwIfCloudflareBlocked(page);
 
         // await inspect(client);
 
@@ -170,17 +236,16 @@ export async function download_filing(index_number, county, auction_date, missin
 
         await Promise.all([
             page.locator("button[name='btnSubmit']").click(),
-            page.waitForNavigation({
-                waitUntil: 'networkidle2',
-            }),
+            waitForDomNavigation(page),
         ]);
+        await throwIfCloudflareBlocked(page);
 
-        const gateState = await waitForSearchGateState(page);
+        let gateState = await waitForSearchGateState(page);
         if (gateState.hasCaptcha) {
             await waitForAnyKey(`Solve captcha/search for ${index_number}, then press any key to continue.`);
+            gateState = await waitForSearchGateState(page);
         }
-        const tableExists = await page.$("table.NewSearchResults");
-        if (!tableExists) {
+        if (!gateState.hasResultsTable) {
             // console.warn(`\n\n${index_number} couldn't find a valid case with this index (table missing)`);
             return finish({ error: 'No case found' });
         }
@@ -189,11 +254,14 @@ export async function download_filing(index_number, county, auction_date, missin
         try {
             await Promise.all([
                 page.locator('table.NewSearchResults > tbody > tr > td > a').click(),
-                page.waitForNavigation({
-                    waitUntil: 'networkidle0',
-                })
+                waitForDomNavigation(page),
             ])
+            await throwIfCloudflareBlocked(page);
+            await page.waitForSelector('select#selDocumentType', { timeout: DOM_TIMEOUT });
         } catch (e) {
+            if (e instanceof CloudflareBlockError) {
+                throw e;
+            }
             // console.warn(`\n\n${index_number} couldn't find a valid case with this index`)
             return finish({ error: 'Failed to find case in CEF' });
         }
@@ -224,21 +292,16 @@ export async function download_filing(index_number, county, auction_date, missin
                 : `${dir}/${baseName}`;
             const pdfPath = path.resolve(`web/saledocs/${relPath}`);
             if (!existsSync(pdfPath) && availableFilings.includes(id)) {
+                await page.waitForSelector('select#selDocumentType', { timeout: DOM_TIMEOUT });
                 await page.select('select#selDocumentType', id);
+                await page.waitForSelector("input[name='btnNarrow']", { timeout: DOM_TIMEOUT });
 
                 const narrowNavigation = (async () => {
-                    try {
-                        await page.waitForNavigation({
-                            waitUntil: 'networkidle0',
-                        });
-                        return true;
-                    } catch (err) {
-                        if (err instanceof TimeoutError) {
-                            console.warn(index_number, 'Timeout waiting for document filter results; continuing with current page');
-                            return false;
-                        }
-                        throw err;
+                    const navigationCompleted = await waitForDomNavigation(page);
+                    if (navigationCompleted) {
+                        await throwIfCloudflareBlocked(page);
                     }
+                    return navigationCompleted;
                 })();
 
                 const [navigationCompleted] = await Promise.all([
@@ -246,11 +309,16 @@ export async function download_filing(index_number, county, auction_date, missin
                     page.locator("input[name='btnNarrow']").click(),
                 ]);
                 if (!navigationCompleted) {
-                    try {
-                        await page.waitForSelector("table.NewSearchResults > tbody > tr", { timeout: 15_000 });
-                    } catch (err) {
-                        console.warn(index_number, 'Results table did not refresh after filter timeout');
+                    console.warn(index_number, 'Timeout waiting for document filter navigation; checking current page');
+                }
+                try {
+                    await page.waitForSelector("table.NewSearchResults", { timeout: DOM_TIMEOUT });
+                    await throwIfCloudflareBlocked(page);
+                } catch (err) {
+                    if (err instanceof CloudflareBlockError) {
+                        throw err;
                     }
+                    console.warn(index_number, 'Results table did not refresh after document filter');
                 }
 
                 let docs = await page.$$eval("table.NewSearchResults > tbody > tr", rows => {
@@ -312,13 +380,18 @@ export async function download_filing(index_number, county, auction_date, missin
 
                 if (clearButton) {
                     try {
-                        await Promise.all([
-                            page.waitForNavigation({
-                                waitUntil: 'networkidle0',
-                            }),
+                        const [navigationCompleted] = await Promise.all([
+                            waitForDomNavigation(page, 5_000),
                             clearButton.evaluate(btn => btn.click()),
                         ]);
+                        if (!navigationCompleted) {
+                            await page.waitForSelector('select#selDocumentType', { timeout: 5_000 });
+                        }
+                        await throwIfCloudflareBlocked(page);
                     } catch (err) {
+                        if (err instanceof CloudflareBlockError) {
+                            throw err;
+                        }
                         console.warn(index_number, 'Failed to reset document filter after download', err);
                         break;
                     } finally {
