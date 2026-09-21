@@ -2,6 +2,6 @@
   "type": "module",
   "dependencies": {
     "better-sqlite3": "^12.5.0",
-    "puppeteer-core": "^23.3.0"
+    "puppeteer-core": "^24.43.1"
   }
 }
